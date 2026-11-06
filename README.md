@@ -42,7 +42,7 @@ where issues get fixed.
 ## Architecture
 
 ```
-CefMedia Relay app (CefMediaRelay.exe; capture is always enabled — the app force-appends its --enable-cefmedia switch at startup)
+CefMedia Relay app (CefMediaRelay.exe)
   channel owner table (chrome layer, 5 slots): tab enables capture -> lowest free
     channel, favicon badge 1..5; cefmedia_channel_start(ch) builds that channel's
     relay on demand (shutdown frees it)
