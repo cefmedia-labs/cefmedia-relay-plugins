@@ -1,0 +1,25 @@
+# Repository-wide editor defaults. Source files are UTF-8 WITHOUT a BOM
+# (compiler flag /utf-8); the .vcxproj/.sln/.rc files keep their BOM/CRLF as
+# mandated by MSBuild/rc.exe — see .gitattributes.
+root = true
+
+[*]
+charset = utf-8
+end_of_line = lf
+insert_final_newline = true
+trim_trailing_whitespace = true
+indent_style = space
+indent_size = 4
+
+[*.{md,ini,json}]
+indent_size = 2
+
+# MSBuild / resource files: MSVC tooling expects CRLF (and the .vcxproj/.sln
+# carry a BOM) — never let an editor or git filter rewrite those.
+[*.{vcxproj,vcxproj.filters,sln,rc}]
+charset = utf-8-bom
+end_of_line = crlf
+trim_trailing_whitespace = false
+
+[*.{bat,cmd}]
+end_of_line = crlf

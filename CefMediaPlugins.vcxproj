@@ -1,0 +1,150 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{9A4C2A1E-7F41-4A4A-9C0C-0C2D3C8E5A10}</ProjectGuid>
+    <RootNamespace>CefMediaPlugins</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>DynamicLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>true</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <!-- Qt dev kit root (headers + import libs for the recorder dock). Override on
+       the msbuild command line: /p:CefMediaQtDir="C:\Qt\6.7.2". Only the headers
+       and .lib files are used at build time - at runtime the plugin resolves the Qt
+       DLLs OBS itself ships (Qt 6 minor releases are binary-compatible). -->
+  <PropertyGroup>
+    <CefMediaQtDir Condition="'$(CefMediaQtDir)'==''">D:\Qt\Qt6.7.2_vs2019_x64</CefMediaQtDir>
+  </PropertyGroup>
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)x64\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)x64\$(Configuration)\obj\</IntDir>
+    <TargetName>cefmedia-relay-plugins</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <AdditionalIncludeDirectories>$(ProjectDir)src;$(ProjectDir)third_party\obs-sdk\include;$(ProjectDir)third_party\cefmedia;$(ProjectDir)third_party\ffmpeg\include;$(ProjectDir)third_party\libipc\include;$(CefMediaQtDir)\include;$(CefMediaQtDir)\include\QtCore;$(CefMediaQtDir)\include\QtGui;$(CefMediaQtDir)\include\QtWidgets;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalOptions>/utf-8 /Zc:__cplusplus /permissive- %(AdditionalOptions)</AdditionalOptions>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;WIN32_LEAN_AND_MEAN;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <DisableSpecificWarnings>4996;%(DisableSpecificWarnings)</DisableSpecificWarnings>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+    </ClCompile>
+    <Link>
+      <AdditionalDependencies>obs.lib;avcodec.lib;avformat.lib;avutil.lib;swscale.lib;swresample.lib;Qt6Core.lib;Qt6Gui.lib;Qt6Widgets.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>$(ProjectDir)third_party\obs-sdk\lib;$(ProjectDir)third_party\ffmpeg\lib;$(CefMediaQtDir)\lib;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalOptions>%(AdditionalOptions) "$(ProjectDir)third_party\libipc\obj\out\x64\$(Configuration)\libipc_static.lib"</AdditionalOptions>
+      <GenerateDebugInformation>true</GenerateDebugInformation>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+    </ClCompile>
+    <Link>
+      <EnableCOMDATFolding>true</EnableCOMDATFolding>
+      <OptimizeReferences>true</OptimizeReferences>
+    </Link>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ResourceCompile Include="src\cefmedia-relay-plugins.rc" />
+  </ItemGroup>
+  <!-- libipc (mutouyun/cpp-ipc) is built from the source vendored under
+       third_party\libipc (see VENDORED.md there) — NOT via ProjectReference:
+       a reference to a project that is not listed in the solution cannot
+       propagate Configuration/Platform reliably (it falls back to the first
+       sln configuration / defaults Platform to Win32), which once linked a
+       Debug-flavored libipc_static.lib into Release builds. Instead the
+       BuildLibipc target below invokes the vendored vcxproj directly with
+       explicit properties, before the plugin's compile step, and the built
+       .lib is linked by explicit path. -->
+  <ItemGroup>
+    <LibipcLib Include="third_party\libipc\obj\out\x64\$(Configuration)\libipc_static.lib" />
+  </ItemGroup>
+  <Target Name="BuildLibipc" BeforeTargets="ClCompile" Condition="'$(Configuration)'=='Debug' or '$(Configuration)'=='Release'">
+    <Message Importance="low" Text="Building vendored libipc ($(Configuration)|x64)..." />
+    <MSBuild Projects="third_party\libipc\libipc_static.vcxproj"
+             Targets="Build"
+             Properties="Configuration=$(Configuration);Platform=x64"
+             BuildInParallel="false" />
+  </Target>
+  <ItemGroup>
+    <ClCompile Include="src\cefmedia_module.cpp" />
+    <ClCompile Include="src\cefmedia_source.cpp" />
+    <ClCompile Include="src\cefmedia_register.cpp" />
+    <ClCompile Include="src\cefmedia_api.cpp" />
+    <ClCompile Include="src\cefmedia_ipc_client.cpp" />
+    <ClCompile Include="src\cefmedia_consumer.cpp" />
+    <ClCompile Include="src\channel_status_tracker.cpp" />
+    <ClCompile Include="src\cefmedia_output.cpp" />
+    <ClCompile Include="src\cefmedia_detect.cpp" />
+    <ClCompile Include="src\cefmedia_recorder.cpp" />
+    <ClCompile Include="src\frame_convert.cpp" />
+    <ClCompile Include="src\frontend_api.cpp" />
+    <ClCompile Include="src\recorder_dock.cpp" />
+    <ClCompile Include="src\recorder_ffmpeg.cpp" />
+    <ClCompile Include="src\path_util.cpp" />
+    <ClCompile Include="src\timeline.cpp" />
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="src\cefmedia_api.h" />
+    <ClInclude Include="src\cefmedia_ipc_client.h" />
+    <ClInclude Include="src\cefmedia_consumer.h" />
+    <ClInclude Include="src\channel_status_tracker.h" />
+    <ClInclude Include="src\cefmedia_output.h" />
+    <ClInclude Include="src\cefmedia_detect.h" />
+    <ClInclude Include="src\cefmedia_recorder.h" />
+    <ClInclude Include="src\cefmedia_register.h" />
+    <ClInclude Include="src\cefmedia_source.h" />
+    <ClInclude Include="src\frame_convert.h" />
+    <ClInclude Include="src\frontend_api.h" />
+    <ClInclude Include="src\recorder_dock.h" />
+    <ClInclude Include="src\recorder_ffmpeg.h" />
+    <ClInclude Include="src\path_util.h" />
+    <ClInclude Include="src\timeline.h" />
+  </ItemGroup>
+  <!-- Deployment: copy the built dll to the OBS plugin dir (best effort; missing write
+       access to Program Files is not a build failure - per-user deployment goes to
+       %ProgramData%\obs-studio\plugins\...\bin\64bit). -->
+  <Target Name="DeployToOBS" AfterTargets="Build">
+    <PropertyGroup>
+      <ObsPluginsDir>C:\Program Files\obs-studio\obs-plugins\64bit</ObsPluginsDir>
+    </PropertyGroup>
+    <Copy SourceFiles="$(OutDir)$(TargetName).dll" DestinationFolder="$(ObsPluginsDir)" SkipUnchangedFiles="true" ContinueOnError="WarnAndContinue" Condition="Exists('$(ObsPluginsDir)')" />
+  </Target>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

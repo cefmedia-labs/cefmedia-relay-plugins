@@ -1,0 +1,100 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <!-- libipc (mutouyun/cpp-ipc) static library, built from the source vendored
+       in this directory — PRISTINE upstream (see VENDORED.md), no local patches.
+       The plugin project links it via ProjectReference (the .lib output is
+       added to its link line automatically).
+       Configurations mirror CefMediaPlugins.vcxproj so the per-configuration
+       ProjectReference mapping always resolves.
+       /MD (shared CRT) in every config: this library is linked only into
+       cefmedia-relay-plugins.dll, which runs inside the OBS process where OBS
+       already guarantees the VC redist. -->
+  <ItemGroup Label="ProjectConfigurations">
+    <ProjectConfiguration Include="Debug|x64">
+      <Configuration>Debug</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+    <ProjectConfiguration Include="Release|x64">
+      <Configuration>Release</Configuration>
+      <Platform>x64</Platform>
+    </ProjectConfiguration>
+  </ItemGroup>
+  <PropertyGroup Label="Globals">
+    <ProjectGuid>{2E7D9C41-5B3A-4F6E-8D2C-9A1B4E6F8C70}</ProjectGuid>
+    <RootNamespace>libipc_static</RootNamespace>
+    <Keyword>Win32Proj</Keyword>
+    <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>true</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'" Label="Configuration">
+    <ConfigurationType>StaticLibrary</ConfigurationType>
+    <UseDebugLibraries>false</UseDebugLibraries>
+    <PlatformToolset>v143</PlatformToolset>
+    <WholeProgramOptimization>false</WholeProgramOptimization>
+    <CharacterSet>Unicode</CharacterSet>
+  </PropertyGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.props" />
+  <PropertyGroup>
+    <OutDir>$(ProjectDir)obj\out\$(Platform)\$(Configuration)\</OutDir>
+    <IntDir>$(ProjectDir)obj\int\$(Platform)\$(Configuration)\</IntDir>
+    <TargetName>libipc_static</TargetName>
+  </PropertyGroup>
+  <ItemDefinitionGroup>
+    <ClCompile>
+      <WarningLevel>Level3</WarningLevel>
+      <SDLCheck>true</SDLCheck>
+      <ConformanceMode>true</ConformanceMode>
+      <LanguageStandard>stdcpp17</LanguageStandard>
+      <PreprocessorDefinitions>_CRT_SECURE_NO_WARNINGS;_WIN32_WINNT=0x0601;WINVER=0x0601;NOMINMAX;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <AdditionalIncludeDirectories>$(ProjectDir)include;$(ProjectDir)src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <MultiProcessorCompilation>true</MultiProcessorCompilation>
+      <FunctionLevelLinking>true</FunctionLevelLinking>
+      <IntrinsicFunctions>true</IntrinsicFunctions>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
+    <ClCompile>
+      <Optimization>Disabled</Optimization>
+      <PreprocessorDefinitions>_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
+    </ClCompile>
+  </ItemDefinitionGroup>
+  <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
+    <ClCompile>
+      <Optimization>MaxSpeed</Optimization>
+      <PreprocessorDefinitions>NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
+      <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
+    </ClCompile>
+    <Lib>
+      <LinkTimeCodeGeneration>false</LinkTimeCodeGeneration>
+    </Lib>
+  </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\libipc\buffer.cpp" />
+    <ClCompile Include="src\libipc\ipc.cpp" />
+    <ClCompile Include="src\libipc\shm.cpp" />
+    <ClCompile Include="src\libipc\imp\codecvt.cpp" />
+    <ClCompile Include="src\libipc\imp\fmt.cpp" />
+    <ClCompile Include="src\libipc\imp\nameof.cpp" />
+    <ClCompile Include="src\libipc\imp\system.cpp" />
+    <ClCompile Include="src\libipc\mem\bytes_allocator.cpp" />
+    <ClCompile Include="src\libipc\mem\central_cache_allocator.cpp" />
+    <ClCompile Include="src\libipc\mem\monotonic_buffer_resource.cpp" />
+    <ClCompile Include="src\libipc\mem\new.cpp" />
+    <ClCompile Include="src\libipc\mem\new_delete_resource.cpp" />
+    <ClCompile Include="src\libipc\platform\platform.cpp" />
+    <ClCompile Include="src\libipc\sync\condition.cpp" />
+    <ClCompile Include="src\libipc\sync\mutex.cpp" />
+    <ClCompile Include="src\libipc\sync\semaphore.cpp" />
+    <ClCompile Include="src\libipc\sync\waiter.cpp" />
+    <!-- platform.c is Windows-only glue pulled in by shm_win.cpp via #include;
+         it does not compile standalone in this configuration. -->
+  </ItemGroup>
+  <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+</Project>

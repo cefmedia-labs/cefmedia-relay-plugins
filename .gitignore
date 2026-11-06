@@ -1,0 +1,11 @@
+# Build output / intermediates
+x64/
+.vs/
+third_party/libipc/obj/
+third_party/libipc/libipc_static.vcxproj.user
+*.vcxproj.user
+
+# Local development reference material (not part of the build; kept out of the
+# repository on purpose)
+third_party/obs-studio-32.2.2/
+third_party/obs-studio-32.2.2.tar.gz

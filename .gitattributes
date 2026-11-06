@@ -1,0 +1,23 @@
+# Normalized line endings: text files get LF in the repo and the platform's
+# native ending on checkout (the repo is Windows-targeted; .editorconfig also
+# pins CRLF for the MSVC files below).
+* text=auto
+
+# MSVC project/solution/resource files MUST keep CRLF (rc.exe and some MSBuild
+# tasks misbehave on LF), and the .vcxproj/.sln keep their UTF-8 BOM.
+*.vcxproj text eol=crlf
+*.vcxproj.filters text eol=crlf
+*.sln text eol=crlf
+*.rc text eol=crlf
+
+# Windows batch files: cmd.exe requires CRLF.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binaries (never diff/merge these).
+*.dll binary
+*.lib binary
+*.exe binary
+*.tar.gz binary
+*.png binary
+*.ico binary

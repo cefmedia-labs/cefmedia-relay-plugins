@@ -1,0 +1,11 @@
+{
+    "display_name": "CefMedia Relay",
+    "id": "cefmedia-relay-plugins",
+    "version": "1.0.0",
+    "os_arch": "x64",
+    "name": "cefmedia-relay-plugins",
+    "description": "Presents the CefMedia Relay's captured audio/video frames (via libipc channels) as an OBS async source, and records them directly to a media file (output plugin).",
+    "urls": {
+        "repository": "https://github.com/cefmedia-labs/cefmedia-relay-plugins"
+    }
+}
