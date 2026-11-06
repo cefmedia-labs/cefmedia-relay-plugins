@@ -4,6 +4,7 @@
 #include <obs.h>
 
 #include <chrono>
+#include <algorithm>
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -917,6 +918,62 @@ void RecorderSetSource(const std::string& source)
     SaveRecorderPrefs(g_prefs);
     blog(LOG_INFO, "[cefmedia] recorder source set to %s (effective on the next start)",
          source.c_str());
+}
+
+std::string RecorderVcodec()
+{
+    return g_prefs.vcodec;
+}
+
+void RecorderSetVcodec(const std::string& vcodec)
+{
+    // Validate to the known set; anything else (hand-edited cfg included) falls back
+    // to "auto" so a typo can never disable recording entirely.
+    const std::string& v =
+        (vcodec == "libx264" || vcodec == "h264_nvenc" || vcodec == "h264_qsv") ? vcodec
+                                                                               : std::string("auto");
+    if (v == g_prefs.vcodec)
+    {
+        return;
+    }
+    g_prefs.vcodec = v;
+    SaveRecorderPrefs(g_prefs);
+    blog(LOG_INFO, "[cefmedia] recorder vcodec set to %s (effective on the next start)",
+         v.c_str());
+}
+
+int RecorderVbitrate()
+{
+    return g_prefs.vbitrate_kbps;
+}
+
+void RecorderSetVbitrate(int vbitrate_kbps)
+{
+    const int v = std::max(500, std::min(60000, vbitrate_kbps));
+    if (v == g_prefs.vbitrate_kbps)
+    {
+        return;
+    }
+    g_prefs.vbitrate_kbps = v;
+    SaveRecorderPrefs(g_prefs);
+    blog(LOG_INFO, "[cefmedia] recorder vbitrate set to %d kbps (effective on the next start)", v);
+}
+
+int RecorderAbitrate()
+{
+    return g_prefs.abitrate_kbps;
+}
+
+void RecorderSetAbitrate(int abitrate_kbps)
+{
+    const int a = std::max(32, std::min(512, abitrate_kbps));
+    if (a == g_prefs.abitrate_kbps)
+    {
+        return;
+    }
+    g_prefs.abitrate_kbps = a;
+    SaveRecorderPrefs(g_prefs);
+    blog(LOG_INFO, "[cefmedia] recorder abitrate set to %d kbps (effective on the next start)", a);
 }
 
 std::string RecorderFolder()

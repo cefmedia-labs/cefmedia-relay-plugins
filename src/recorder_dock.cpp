@@ -4,7 +4,10 @@
 // resolves to OBS's DLLs at load time — nothing Qt needs to be deployed with the plugin).
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QCheckBox>
+#include <QtWidgets/QDialog>
+#include <QtWidgets/QDialogButtonBox>
 #include <QtWidgets/QFileDialog>
+#include <QtWidgets/QFormLayout>
 #include <QtWidgets/QGridLayout>
 #include <QtWidgets/QHBoxLayout>
 #include <QtWidgets/QLabel>
@@ -12,6 +15,7 @@
 #include <QtWidgets/QMainWindow>
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QPushButton>
+#include <QtWidgets/QSpinBox>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 #include <QtCore/QByteArray>
@@ -151,13 +155,158 @@ private:
     QPushButton* browse_btn_ = nullptr;
 };
 
+// Less-frequent recorder settings (everything but Channel / Speed / Autostop, which
+// stay in the dock grid): Source / Format / Encoder / bitrates / Folder. A plain
+// QDialog with a QFormLayout — no OBSPropertiesView (that would drag in OBS's shared
+// properties-view widget tree, moc included); no Q_OBJECT (lambda connects only), so
+// no moc run either. Every control prefills from the control surface on construction;
+// OK commits each value through its RecorderSet* (which validates + persists to
+// recorder.cfg, effective on the next start), Cancel discards everything.
+//
+// Field order follows the recording pipeline: what to record (Source) -> how to encode
+// (Container -> Video encoder -> bitrates) -> where to put it (Folder last, so the
+// encoding chain is not interrupted by a path row).
+class RecorderSettingsDialog : public QDialog
+{
+public:
+    explicit RecorderSettingsDialog(QWidget* parent = nullptr) : QDialog(parent)
+    {
+        setWindowTitle(T("Dock.Settings"));
+        setModal(true);
+        setSizeGripEnabled(false);
+
+        auto* form = new QFormLayout();
+        form->setHorizontalSpacing(8);
+        form->setVerticalSpacing(6);
+
+        // Source: which streams the next recording captures (va / v / a).
+        source_box_ = new QComboBox(this);
+        source_box_->addItem(T("Props.Source.VideoAudio")); // index 0 -> "va"
+        source_box_->addItem(T("Props.Source.VideoOnly"));  // index 1 -> "v"
+        source_box_->addItem(T("Props.Source.AudioOnly"));  // index 2 -> "a"
+        {
+            const std::string src = RecorderSource();
+            source_box_->setCurrentIndex(src == "v" ? 1 : (src == "a" ? 2 : 0));
+        }
+        form->addRow(T("Props.Source"), source_box_);
+
+        // Container format for the output file (mkv / mp4).
+        format_box_ = new QComboBox(this);
+        format_box_->addItem("mkv");
+        format_box_->addItem("mp4");
+        format_box_->setCurrentText(QString::fromStdString(RecorderFormat()));
+        form->addRow(T("Props.Container"), format_box_);
+
+        // Video encoder preference (auto probes NVENC -> QSV -> x264 at start).
+        vcodec_box_ = new QComboBox(this);
+        vcodec_box_->addItem(T("Props.Encoder.Auto"), "auto");
+        vcodec_box_->addItem(T("Props.Encoder.X264"), "libx264");
+        vcodec_box_->addItem(T("Props.Encoder.Nvenc"), "h264_nvenc");
+        vcodec_box_->addItem(T("Props.Encoder.Qsv"), "h264_qsv");
+        vcodec_box_->setCurrentIndex(
+            vcodec_box_->findData(QString::fromStdString(RecorderVcodec())));
+        form->addRow(T("Props.Encoder"), vcodec_box_);
+
+        // Bitrates: the same ranges/steps the output properties declare
+        // (vbitrate 500..60000 step 500, abitrate 32..512 step 32, kbps).
+        const int vbit = RecorderVbitrate();
+        vbitrate_spin_ = new QSpinBox(this);
+        vbitrate_spin_->setRange(500, 60000);
+        vbitrate_spin_->setSingleStep(500);
+        vbitrate_spin_->setValue(vbit > 0 ? vbit : 8000);
+        vbitrate_spin_->setSuffix(" kbps");
+        form->addRow(T("Props.VideoBitrate"), vbitrate_spin_);
+
+        const int abit = RecorderAbitrate();
+        abitrate_spin_ = new QSpinBox(this);
+        abitrate_spin_->setRange(32, 512);
+        abitrate_spin_->setSingleStep(32);
+        abitrate_spin_->setValue(abit > 0 ? abit : 160);
+        abitrate_spin_->setSuffix(" kbps");
+        form->addRow(T("Props.AudioBitrate"), abitrate_spin_);
+
+        // Folder: the same editor + browse + open-in-Explorer trio the grid used to
+        // carry (FolderEdit has the embedded "…" browse button).
+        folder_edit_ = new FolderEdit(this);
+        folder_edit_->setText(QString::fromStdString(RecorderFolder()));
+        auto* folder_row = new QHBoxLayout();
+        folder_row->setSpacing(4);
+        folder_row->addWidget(folder_edit_, 1); // edit box stretches (browse inside it)
+        auto* open_btn = new QPushButton(T("Dock.Open"), this);
+        open_btn->setToolTip(T("Dock.Tooltip.Open"));
+        folder_row->addWidget(open_btn);
+        form->addRow(T("Dock.Folder"), folder_row);
+        connect(folder_edit_, &QLineEdit::editingFinished, this, [this] {
+            const std::string path = folder_edit_->text().toStdString();
+            if (!RecorderSetFolder(path))
+            {
+                folder_edit_->setText(
+                    QString::fromStdString(RecorderFolder())); // rejected: revert display
+            }
+        });
+        connect(folder_edit_->BrowseButton(), &QPushButton::clicked, this, [this] {
+            const QString start = QString::fromStdString(RecorderFolder());
+            const QString dir = QFileDialog::getExistingDirectory(
+                this, T("Dock.Dialog.SelectFolder"), start);
+            if (dir.isEmpty())
+            {
+                return; // cancelled
+            }
+            folder_edit_->setText(dir);
+            if (RecorderSetFolder(dir.toStdString()))
+            {
+                folder_edit_->setText(QString::fromStdString(RecorderFolder()));
+            }
+        });
+        connect(open_btn, &QPushButton::clicked, this, [this] {
+            const QString dir = QString::fromStdString(RecorderFolder());
+            QDir().mkpath(dir); // ensure it exists before handing it to Explorer
+            QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+        });
+
+        // OK commits (setters validate + persist), Cancel just closes — nothing was
+        // written yet. The folder editor is the exception: its edits commit through
+        // RecorderSetFolder as they are made (same behavior the grid row had).
+        auto* buttons =
+            new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, this);
+        buttons->button(QDialogButtonBox::Ok)->setText(T("Dock.Dialog.Ok"));
+        buttons->button(QDialogButtonBox::Cancel)->setText(T("Dock.Dialog.Cancel"));
+        connect(buttons, &QDialogButtonBox::accepted, this, [this] {
+            RecorderSetSource(source_box_->currentIndex() == 1   ? "v"
+                              : source_box_->currentIndex() == 2 ? "a"
+                                                                 : "va");
+            RecorderSetFormat(format_box_->currentText().toStdString());
+            RecorderSetVcodec(vcodec_box_->currentData().toString().toStdString());
+            RecorderSetVbitrate(vbitrate_spin_->value());
+            RecorderSetAbitrate(abitrate_spin_->value());
+            accept();
+        });
+        connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
+
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(12, 12, 12, 12);
+        layout->addLayout(form);
+        layout->addWidget(buttons);
+    }
+
+private:
+    QComboBox* source_box_ = nullptr;
+    QComboBox* format_box_ = nullptr;
+    QComboBox* vcodec_box_ = nullptr;
+    QSpinBox* vbitrate_spin_ = nullptr;
+    QSpinBox* abitrate_spin_ = nullptr;
+    FolderEdit* folder_edit_ = nullptr;
+};
+
 // Panel without Q_OBJECT: every interaction is a lambda-connected signal, so no moc run
 // is required. OBS owns the widget once the dock is registered.
 //
-// Layout: one QGridLayout with a shared label column (col 0) and a stretching control
-// column (col 1) — labels align left at equal width, controls fill the remaining width,
-// and every row gets the same height from the grid. Settings rows (Format / Speed /
-// Folder) and the info row (Output: recorded content time / file size) share the grid.
+// Layout: a Start/Stop toggle button above a QGridLayout with a shared label column
+// (col 0) and a stretching control column (col 1) — labels align left at equal width,
+// controls fill the remaining width, and every row gets the same height from the grid.
+// The frequently-touched settings (Channel / Speed / Autostop) stay in the grid (the
+// Settings button rides the Speed row); the rest (Source / Format / Encoder / bitrates
+// / Folder) live in the RecorderSettingsDialog.
 class RecorderPanel : public QWidget
 {
 public:
@@ -204,11 +353,26 @@ public:
             // shows the selected channel's state too.
             channel_box_->addItem(MakeChannelStateIcon(false), QString::number(i));
         }
+        // Channel row and Speed row share the control column; each row's trailing
+        // part (the 5 occupancy dots vs the Settings button) would otherwise leave
+        // the two combos at different widths (both are "column width minus trailing").
+        // Reserve the SAME trailing width on both rows — the max of the two natural
+        // widths: the Settings button gets that fixed width, the dots row gets a
+        // fixed spacer of the difference, so both combos render equal-width.
+        const int kRowSpacing = 4; // matches the QHBoxLayout spacings below
+        const int dots_w = CEFMEDIA_CHANNEL_COUNT * kDotDiameter +
+                           (CEFMEDIA_CHANNEL_COUNT - 1) * kRowSpacing;
+        settings_btn_ = new QPushButton(T("Dock.Settings"), this);
+        settings_btn_->setStyleSheet(kButtonStyleIdle);
+        settings_btn_->setToolTip(T("Dock.Tooltip.Settings"));
+        const int trailing_w = qMax(settings_btn_->sizeHint().width(), dots_w);
+        settings_btn_->setFixedWidth(trailing_w);
+
         channel_box_->setCurrentIndex(RecorderChannel()); // 0-based index == UI-1
         // Occupancy indicator rides the Channel row (right of the combo): 5 dots
         // mirroring CefMedia Relay's channel bitmap (lit = a tab owns that channel).
         auto* channel_row = new QHBoxLayout();
-        channel_row->setSpacing(4); // gap between combo and dots cluster
+        channel_row->setSpacing(kRowSpacing); // gap between combo and dots cluster
         channel_row->addWidget(channel_box_, 1); // combo fills the leading width
         for (int i = 0; i < CEFMEDIA_CHANNEL_COUNT; ++i) {
             QLabel* dot = new QLabel(this);
@@ -219,28 +383,20 @@ public:
             channel_row->addWidget(dot);
             occupancy_dots_.push_back(dot);
         }
-        grid->addLayout(channel_row, row++, 1);
-        // The occupancy dots share the Channel row (column 1), so the settings
-        // grid rows now run: Channel / Source / Format / Speed / Folder / Autostop.
-
-        grid->addWidget(new QLabel(T("Dock.Source"), this), row, 0);
-        source_box_ = new QComboBox(this);
-        source_box_->addItem(T("Dock.Source.VideoAudio"));
-        source_box_->addItem(T("Dock.Source.VideoOnly"));
-        source_box_->addItem(T("Dock.Source.AudioOnly"));
+        // Right-align the dots with the (wider) Settings button: pad the difference
+        // on the right so the dots' right edge matches the button's right edge and
+        // both rows' combos end at the same x.
+        if (trailing_w > dots_w)
         {
-            // Persisted token ("va"/"v"/"a") -> combo index.
-            const std::string src = RecorderSource();
-            source_box_->setCurrentIndex(src == "v" ? 1 : (src == "a" ? 2 : 0));
+            channel_row->addSpacerItem(new QSpacerItem(trailing_w - dots_w, 1,
+                                                       QSizePolicy::Fixed,
+                                                       QSizePolicy::Minimum));
         }
-        grid->addWidget(source_box_, row++, 1);
-
-        grid->addWidget(new QLabel(T("Dock.Format"), this), row, 0);
-        format_box_ = new QComboBox(this);
-        format_box_->addItem("mkv");
-        format_box_->addItem("mp4");
-        format_box_->setCurrentText(QString::fromStdString(RecorderFormat()));
-        grid->addWidget(format_box_, row++, 1);
+        grid->addLayout(channel_row, row++, 1);
+        // The occupancy dots share the Channel row (column 1), and the Settings
+        // button rides the Speed row — the settings grid rows run:
+        // Channel / Speed(+Settings) / Autostop. Source/Format/Encoder/bitrates/
+        // Folder live in the Settings dialog (less-frequent settings).
 
         grid->addWidget(new QLabel(T("Dock.Speed"), this), row, 0);
         speed_box_ = new QComboBox(this);
@@ -253,18 +409,15 @@ public:
             const int idx = sp == 1500 ? 1 : (sp == 2000 ? 2 : (sp == 3000 ? 3 : 0));
             speed_box_->setCurrentIndex(idx);
         }
-        grid->addWidget(speed_box_, row++, 1);
-
-        grid->addWidget(new QLabel(T("Dock.Folder"), this), row, 0);
-        auto* folder_row = new QHBoxLayout();
-        folder_row->setSpacing(4);
-        folder_edit_ = new FolderEdit(this);
-        folder_edit_->setText(QString::fromStdString(RecorderFolder()));
-        folder_row->addWidget(folder_edit_, 1); // edit box stretches (browse inside it)
-        open_btn_ = new QPushButton(T("Dock.Open"), this);
-        open_btn_->setToolTip(T("Dock.Tooltip.Open"));
-        folder_row->addWidget(open_btn_);
-        grid->addLayout(folder_row, row++, 1);
+        // The Settings button shares the Speed row (right end, fixed width — see the
+        // trailing-width note above the Channel row): settings are opened rarely, so
+        // a compact trailing button reads as an affordance without earning its own
+        // grid row.
+        auto* speed_row = new QHBoxLayout();
+        speed_row->setSpacing(kRowSpacing);
+        speed_row->addWidget(speed_box_, 1); // combo fills the leading width
+        speed_row->addWidget(settings_btn_, 0);
+        grid->addLayout(speed_row, row++, 1);
 
         // Auto-stop toggle: when checked, the recording ends by itself when CefMedia Relay
         // reports the current video playback end (End-flag frame) — a full episode is
@@ -299,7 +452,7 @@ public:
         // Uniform perceived row spacing: grid rows are as tall as their tallest widget.
         // Raise every row's minimum height to the combo height so the text-to-text
         // rhythm is identical across all rows.
-        row_height_cached_ = format_box_->sizeHint().height();
+        row_height_cached_ = speed_box_->sizeHint().height();
         for (int r = 0; r < row; ++r)
         {
             grid->setRowMinimumHeight(r, row_height_cached_);
@@ -312,10 +465,10 @@ public:
         grid->setRowMinimumHeight(hint_row_, 0);
         // Lock the label column width to the widest label across ALL rows (otherwise
         // different label texts would give column 0 a ragged width). Labeled rows:
-        // Channel (0) / Source (1) / Format (2) / Speed (3) / Folder (4) / Output (6);
-        // the auto-stop row (5) and the hint row (7) have no col-0 label.
+        // Channel (0) / Speed (1) / Output (3); the auto-stop row (2) and the hint
+        // row (4) have no col-0 label.
         int label_w = 0;
-        for (int labeled_row : {0, 1, 2, 3, 4, 6})
+        for (int labeled_row : {0, 1, 3})
         {
             auto* item = grid->itemAtPosition(labeled_row, 0);
             if (!item || !item->widget())
@@ -334,19 +487,16 @@ public:
 
         // Channel selection: persists immediately, effective on the next start
         // (a running recording keeps its start-time channel snapshot). Disabled
-        // while recording — same "next start" semantics as Format/Folder, made
-        // visible instead of silently ignored.
+        // while recording — same "next start" semantics as the dialog settings,
+        // made visible instead of silently ignored.
         connect(channel_box_, &QComboBox::currentIndexChanged, this, [this](int index) {
             RecorderSetChannel(index); // 0-based index == 0-based channel
             channel_box_->setEnabled(!RecorderIsRecording());
         });
 
-        // Format/Source changes persist immediately; effective on the next start.
-        connect(format_box_, &QComboBox::currentTextChanged, this, [](const QString& text) {
-            RecorderSetFormat(text.toStdString());
-        });
-        connect(source_box_, &QComboBox::currentIndexChanged, this, [this](int index) {
-            RecorderSetSource(index == 1 ? "v" : (index == 2 ? "a" : "va"));
+        connect(settings_btn_, &QPushButton::clicked, this, [this] {
+            RecorderSettingsDialog dialog(this);
+            dialog.exec(); // modal; the 1 s timer keeps running in the nested loop
         });
 
         // Auto-stop toggle: persist immediately; effective on the next start (a running
@@ -373,34 +523,8 @@ public:
             }
         });
 
-        // Folder: commit on edit finish / browse selection; open in Explorer on demand.
-        connect(folder_edit_, &QLineEdit::editingFinished, this, [this] {
-            const std::string path = folder_edit_->text().toStdString();
-            if (!RecorderSetFolder(path))
-            {
-                folder_edit_->setText(
-                    QString::fromStdString(RecorderFolder())); // rejected: revert display
-            }
-        });
-        connect(folder_edit_->BrowseButton(), &QPushButton::clicked, this, [this] {
-            const QString start = QString::fromStdString(RecorderFolder());
-            const QString dir = QFileDialog::getExistingDirectory(
-                this, T("Dock.Dialog.SelectFolder"), start);
-            if (dir.isEmpty())
-            {
-                return; // cancelled
-            }
-            folder_edit_->setText(dir);
-            if (RecorderSetFolder(dir.toStdString()))
-            {
-                folder_edit_->setText(QString::fromStdString(RecorderFolder()));
-            }
-        });
-        connect(open_btn_, &QPushButton::clicked, this, [this] {
-            const QString dir = QString::fromStdString(RecorderFolder());
-            QDir().mkpath(dir); // ensure it exists before handing it to Explorer
-            QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
-        });
+        // (the Settings dialog owns its own folder editor/browse/open wiring; the
+        // source/format/encoder/bitrates persist through the dialog's OK button).
 
         connect(toggle_btn_, &QPushButton::clicked, this, [this] {
             if (RecorderIsRecording())
@@ -600,13 +724,10 @@ public:
     }
 
     QPushButton* toggle_btn_ = nullptr;
+    QPushButton* settings_btn_ = nullptr;
     QComboBox* channel_box_ = nullptr;
-    QComboBox* source_box_ = nullptr;
-    QComboBox* format_box_ = nullptr;
     QComboBox* speed_box_ = nullptr;
     QCheckBox* autostop_check_ = nullptr;
-    FolderEdit* folder_edit_ = nullptr;
-    QPushButton* open_btn_ = nullptr;
     QGridLayout* grid_ = nullptr;
     QLabel* output_title_ = nullptr;
     QLabel* output_label_ = nullptr;

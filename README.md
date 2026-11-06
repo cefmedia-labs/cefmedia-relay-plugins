@@ -1,4 +1,4 @@
-# OBS CefMedia Plugins
+# CefMedia Relay Plugins
 
 Repository: <https://github.com/cefmedia-labs/cefmedia-relay-plugins>
 
@@ -22,6 +22,22 @@ binaries are redistributed — FFmpeg and Qt resolve to the DLLs OBS Studio itse
 ships. This repository builds standalone: it does not require the CefMedia tree
 (the libipc static library is vendored under `third_party\libipc\`, see
 `VENDORED.md` there for the local patches it carries).
+
+## AI-Assistance Disclosure
+
+Per the OBS Project's resource policy, this discloses how AI tools were used to
+develop this plugin: **Claude Code** (Anthropic) was used as an AI coding assistant
+for drafting and refactoring code, writing documentation, and debugging assistance.
+The architecture and feature design, the review of every change, the testing in
+OBS, and all release decisions are human-led. This repository is maintained by
+CefMedia Labs.
+
+## Support & Issues
+
+Please report bugs and feature requests on the repository's issue tracker:
+<https://github.com/cefmedia-labs/cefmedia-relay-plugins/issues>.
+Discussion in the resource's forum thread is also fine — but the tracker is
+where issues get fixed.
 
 ## Architecture
 
@@ -193,29 +209,32 @@ Or copy as admin to `C:\Program Files\obs-studio\obs-plugins\64bit\`.
    Channel** (1..5, default 1) picks which tab's stream shows; multiple sources can
    show different channels (or the same one) at once.
 4. **Output plugin** (records the CefMedia Relay stream independently, scene-agnostic): open the
-   **Docks -> CefMedia Relay panel** — Start/Stop toggle button; settings section:
-   **Channel** (1..5, the tab whose favicon badge shows this number gets recorded;
-   disabled while recording — next-start semantics), the 5 occupancy dots under it
-   mirror CefMedia Relay's live channel bitmap, Source (va/v/a), Format (mkv/mp4), Speed
-   (1x/1.5x/2x/3x, **applied to the recorded channel's tab only while
+   **Docks -> CefMedia Relay panel** — a Start/Stop toggle plus a **Settings** button; the
+   grid carries the frequently-touched settings: **Channel** (1..5, the tab whose favicon
+   badge shows this number gets recorded; disabled while recording — next-start
+   semantics), the 5 occupancy dots next to it mirror CefMedia Relay's live channel
+   bitmap, **Speed** (1x/1.5x/2x/3x, **applied to the recorded channel's tab only while
    recording** — pushed over the libipc rate channel with the channel field on change
    and re-asserted every 3 s (covers page navigations / new tabs); stopping the
    recording restores 1x on that channel while the combo keeps its selection for the
-   next start), Folder (editable + embedded browse button + open-in-Explorer, default
-   `%USERPROFILE%\Videos\CefMedia`); recording info row: **Output** (the **actual
-   recorded content time** on the file timeline — stops while CefMedia Relay pauses —
-   and the output file size, centered, always visible: idle shows
-   "00:00:00 / 0.0 MB"). Or use **Tools -> CefMedia Relay · Start/Stop Recording** as
-   the menu fallback (both stay in sync; the menu path records the recorder.cfg
-   channel).
-   Container/encoder/bitrate/channel/speed/folder are configured in
+   next start), and the **Autostop** checkbox (end the recording when CefMedia Relay
+   reports playback end). The **Settings** dialog holds the rest: Source (video+audio /
+   video only / audio only), Container (mkv/mp4), Video encoder (auto / libx264 /
+   NVENC / QSV), Video/Audio bitrate, and the output Folder (editable + browse +
+   open-in-Explorer, default `%USERPROFILE%\Videos\CefMedia`). A recording info row,
+   **Output**, shows the **actual recorded content time** on the file timeline — stops
+   while CefMedia Relay pauses — and the output file size, centered, visible from the
+   first recording on (idle shows "00:00:00 / 0.0 MB"). Or use **Tools -> CefMedia
+   Relay · Start/Stop Recording** as the menu fallback (both stay in sync; the menu
+   path records the recorder.cfg channel).
+   Everything the dialog sets (and channel/speed) can alternatively be configured in
    `%APPDATA%\obs-studio\plugin_config\cefmedia-relay-plugins\recorder.cfg`
    (keys: `format` mkv|mp4, `vcodec`, `vbitrate`, `abitrate`, `channel` 1..5
    (0-based internally; out-of-range falls back to 1), `speed_permille`
    1000|1500|2000|3000 (legacy `speed` 1|2|3 still read), `folder` — output
    directory, `cefmedia_path` — CefMedia Relay executable for the recording-start
-   auto-launch probe; default `format=mkv`; set `format=mp4` to record MP4) or in the panel;
-   format/folder/channel changes are effective on the next start.
+   auto-launch probe; default `format=mkv`; set `format=mp4` to record MP4);
+   container/encoder/bitrate/folder/channel changes are effective on the next start.
    **CefMedia Relay auto-launch**: when `cefmedia_path` is set and a recording start sees
    no frames for ~4 s, the plugin asks Yes/No before starting CefMedia Relay with
    `--enable-cefmedia` (localized prompt, `Launch.Confirm` key; the launch is never

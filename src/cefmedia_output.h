@@ -80,6 +80,28 @@ std::string RecorderSource();
 // the next start (the recorder drops the other side's frames at enqueue time).
 void RecorderSetSource(const std::string& source);
 
+// Video encoder preference for the next recording ("auto" / "libx264" /
+// "h264_nvenc" / "h264_qsv"; "auto" probes NVENC -> QSV -> x264 at start).
+std::string RecorderVcodec();
+
+// Set the video encoder (validates to the set above, anything else falls back to
+// "auto"), persists to recorder.cfg; effective on the next start.
+void RecorderSetVcodec(const std::string& vcodec);
+
+// Video bitrate in kbps for the next recording (clamped to 500..60000).
+int RecorderVbitrate();
+
+// Set the video bitrate (clamped to 500..60000), persists to recorder.cfg; effective on
+// the next start.
+void RecorderSetVbitrate(int vbitrate_kbps);
+
+// Audio bitrate in kbps for the next recording (clamped to 32..512).
+int RecorderAbitrate();
+
+// Set the audio bitrate (clamped to 32..512), persists to recorder.cfg; effective on
+// the next start.
+void RecorderSetAbitrate(int abitrate_kbps);
+
 // Auto-stop: end the recording when a video frame carries CefFrameFlag_End (CefMedia Relay's
 // playback-ended notification after the current video's last frame). Persists to
 // recorder.cfg; effective on the next start.
