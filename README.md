@@ -42,7 +42,7 @@ where issues get fixed.
 ## Architecture
 
 ```
-CefMedia Relay app (CefMediaRelay.exe, --enable-cefmedia)
+CefMedia Relay app (CefMediaRelay.exe; capture is always enabled — the app force-appends its --enable-cefmedia switch at startup)
   channel owner table (chrome layer, 5 slots): tab enables capture -> lowest free
     channel, favicon badge 1..5; cefmedia_channel_start(ch) builds that channel's
     relay on demand (shutdown frees it)
@@ -202,7 +202,7 @@ Or copy as admin to `C:\Program Files\obs-studio\obs-plugins\64bit\`.
 
 ## Usage & Verification
 
-1. Start CefMedia Relay (auto-appends `--enable-cefmedia`); the first capturing tab
+1. Start CefMedia Relay; the first capturing tab
    takes channel 1 automatically (its favicon shows the white badge "1").
 2. Restart OBS.
 3. **Source plugin**: add source -> "CefMedia Relay" -> properties -> **Capture
@@ -236,8 +236,8 @@ Or copy as admin to `C:\Program Files\obs-studio\obs-plugins\64bit\`.
    auto-launch probe; default `format=mkv`; set `format=mp4` to record MP4);
    container/encoder/bitrate/folder/channel changes are effective on the next start.
    **CefMedia Relay auto-launch**: when `cefmedia_path` is set and a recording start sees
-   no frames for ~4 s, the plugin asks Yes/No before starting CefMedia Relay with
-   `--enable-cefmedia` (localized prompt, `Launch.Confirm` key; the launch is never
+   no frames for ~4 s, the plugin asks Yes/No before starting CefMedia Relay
+   (localized prompt, `Launch.Confirm` key; the launch is never
    silent). The one-shot check at OBS startup asks the same way. The Chromium
    ProcessSingleton folds redundant launches, so this is safe even when CefMedia Relay
    is already running.
