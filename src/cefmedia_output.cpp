@@ -479,6 +479,11 @@ static void update(void* data, obs_data_t* settings)
         d->channel = ui_channel - 1;
     }
     d->autostop = obs_data_get_bool(settings, "autostop");
+    // Push to the recorder immediately (update can arrive while the output is
+    // active — properties Apply mid-recording): the End frame is a one-shot, so a
+    // deferred snapshot at the next start would miss it. start() sets it again
+    // from the same settings; the store is idempotent (atomic member).
+    d->recorder.SetAutoStop(d->autostop);
 }
 
 static uint64_t get_total_bytes(void* data)
@@ -850,8 +855,16 @@ void RecorderSetAutoStop(bool enabled)
     }
     g_prefs.autostop = enabled;
     SaveRecorderPrefs(g_prefs);
-    blog(LOG_INFO, "[cefmedia] recorder autostop set to %d (effective on the next start)",
-         enabled ? 1 : 0);
+    // Push to the LIVE recording too: the End frame is a one-shot, so deferring the
+    // switch to the next start would miss it — the toggle must be visible to the
+    // running recorder's OnVideoFrame (auto_stop_ is atomic). The recorder member
+    // exists whenever the output data exists (created before start, freed at destroy).
+    if (g_menu_output_data)
+    {
+        g_menu_output_data->recorder.SetAutoStop(enabled);
+    }
+    blog(LOG_INFO, "[cefmedia] recorder autostop set to %d%s",
+         enabled ? 1 : 0, g_menu_recording ? " (live, recording)" : "");
 }
 
 // The configured cefmedia_path (recorder.cfg; re-read on every call — the

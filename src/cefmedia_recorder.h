@@ -65,10 +65,12 @@ public:
     // Auto-stop switch: when true, a video frame carrying CefFrameFlag_End (the
     // renderer's playback-ended notification) stops the recording through the
     // error-callback path (safe from the reader thread; the output layer then
-    // finalizes and resets state like any other stop). Must be called before
-    // StartRecord (snapshot at start).
-    void SetAutoStop(bool enabled) { auto_stop_ = enabled; }
-    bool AutoStop() const { return auto_stop_; }
+    // finalizes and resets state like any other stop). Takes effect immediately,
+    // including mid-recording: the End frame is a one-shot, so a toggle made
+    // before it arrives must be visible to OnVideoFrame (hence the atomic —
+    // written on the UI thread, read on the ipc receive thread).
+    void SetAutoStop(bool enabled) { auto_stop_.store(enabled); }
+    bool AutoStop() const { return auto_stop_.load(); }
 
     // cefmedia ipc receive callbacks (CefMediaIpcClient threads, thread-safe; obj = this).
     // Registered on ONE capture channel (the output's channel binding), so the frames
@@ -136,7 +138,7 @@ private:
     int vbitrate_kbps_ = 0, abitrate_kbps_ = 0;
     bool want_video_ = true; // source selection snapshot: which sides to record
     bool want_audio_ = true;
-    bool auto_stop_ = false; // stop the recording on an End-flag video frame
+    std::atomic<bool> auto_stop_{false}; // stop the recording on an End-flag video frame
 
     // Engine
     FfmpegRecorderCore core_;
