@@ -104,16 +104,14 @@ constexpr int kCrawlRunMin = 5;
 // render pts crawls while decode pts advance normally) — the hold
 // would never release, so it is waived and the container gate becomes the only bound.
 constexpr int64_t kSourceDivergeWaiveUs = 10 * 1000000;
-// Container-gate audio lead allowance: the
-// gate normally holds audio at video_end, but at 3x the video renderer can
-// transiently starve (slow decode) while the decode-side audio keeps flowing —
-// video_end stalls and every arriving chunk got DROPPED (one measured 3x
-// session: gate overflow 230 frames / 4.6 s, audible AAC tearing). Allowing the
-// encoded audio to run up to 500 ms past the video end converts the tear into a
-// bounded A/V skew on healthy recovery (audio leads by at most the allowance);
-// on a normal stream both timelines advance at the same rate and the allowance
-// is never touched. Seek/re-anchor and sweep semantics are unchanged.
-constexpr int64_t kAudioLeadAllowanceUs = 500 * 1000;
+// (2026-11-07) The 500 ms container-gate lead allowance added 2026-11-04 is GONE.
+// It was needed when a full gate DROPPED arriving chunks (3x renderer starvation
+// tore the audio, 230 frames / 4.6 s); the live paths now HOLD at a full gate
+// instead, so held audio drains aligned once video_end grows again — no tear, and
+// no allowance to bake orphan audio past the video end (a 3x popup-stall session
+// ended with audio_pos pinned at video_end+500 ms and a 500 ms audio lead baked
+// into the file from the starved span). The gate is strict video_end everywhere
+// now; orphan audio is dropped at the stop drain instead.
 // Pad budget for the source-domain hold: after a re-anchor CefMedia Relay's audio and
 // video clocks can sit a few seconds apart (the audio pipeline re-anchors at a
 // slightly different position than the video render clock), so the hold can pin the
@@ -684,6 +682,19 @@ void CefMediaRecorder::WorkerProc()
     // dropped once the gate is full instead of inflating the audio track.
     int64_t gate_dropped_frames_ = 0;
     int64_t gate_dropped_us_ = 0;
+    // Backward-jitter drops (<= kBackwardReanchorUs, silent by design): a burst here
+    // erases video content while audio keeps flowing — the perceived audio-ahead
+    // signature of a popup that stops delivering frames. Zero logging made such a
+    // burst invisible; count and throttle-log it.
+    int64_t backward_dropped_frames_ = 0;
+    int64_t last_backward_log_ms_ = 0;
+    // Frozen-video gaps: the next video frame's src PTS skipped > 10 intervals (frames
+    // lost upstream) — the CFR fill freezes the picture over the span while audio keeps
+    // flowing. Perceived as audio ahead of video for the gap duration. Same observability
+    // fix as the backward-jitter counter.
+    int64_t frozen_gap_count_ = 0;
+    int64_t frozen_gap_us_total_ = 0;
+    int64_t last_gap_log_ms_ = 0;
     // Cumulative FillSilence padding since the last real-audio encode (the src-hold
     // pad budget, see kHoldPadBudgetUs).
     int64_t padded_since_audio_us_ = 0;
@@ -774,6 +785,15 @@ void CefMediaRecorder::WorkerProc()
                     const int64_t backward = -delta;
                     if (backward <= kBackwardReanchorUs)
                     {
+                        ++backward_dropped_frames_;
+                        if (now_ms - last_backward_log_ms_ > 1000)
+                        {
+                            last_backward_log_ms_ = now_ms;
+                            blog(LOG_WARNING,
+                                 "[cefmedia] recorder: backward jitter drop %lld ms (burst "
+                                 "erases video content, audio keeps flowing)",
+                                 (long long)(backward / 1000));
+                        }
                         av_frame_free(&vf);
                         vf = NULL;
                     }
@@ -867,8 +887,33 @@ void CefMediaRecorder::WorkerProc()
                     ++crawl_steps_total_;
                 }
 
+                const int64_t video_end_prev_us = video_end_norm_us; // pre-update snapshot
                 const int64_t norm_pts_us = vf->pts - video_base_us;
                 video_end_norm_us = norm_pts_us + interval_us;
+                // Frozen-gap probe: the source PTS skipped more than 10 intervals since
+                // the previous frame without a re-anchor/absorb (those land the new
+                // frame AT the old end, gap 0) — frames were lost upstream and
+                // EncodeVideoCfr will freeze the picture over the span while audio
+                // keeps flowing. Sub-1s gaps don't trigger the absorb log, so this is
+                // the only observable trace of a popup stopping delivery.
+                if (video_end_prev_us != INT64_MIN && norm_pts_us > video_end_prev_us)
+                {
+                    const int64_t gap_us = norm_pts_us - video_end_prev_us;
+                    if (gap_us > 10 * interval_us)
+                    {
+                        ++frozen_gap_count_;
+                        frozen_gap_us_total_ += gap_us;
+                        if (now_ms - last_gap_log_ms_ > 1000)
+                        {
+                            last_gap_log_ms_ = now_ms;
+                            blog(LOG_WARNING,
+                                 "[cefmedia] recorder: video pts gap %lld ms -> picture "
+                                 "frozen over the span (frames lost upstream), audio keeps "
+                                 "flowing",
+                                 (long long)(gap_us / 1000));
+                        }
+                    }
+                }
 
                 if (reanchored || forward_absorbed)
                 {
@@ -963,7 +1008,7 @@ void CefMediaRecorder::WorkerProc()
                             break; // decode-side lookahead: hold for the render position
                         }
                         if (core_.AudioPositionUs() + af_queued->duration >
-                            video_end_norm_us + kAudioLeadAllowanceUs)
+                            video_end_norm_us)
                         {
                             break; // gate full: hold (video_end grows with the next frames)
                         }
@@ -1079,24 +1124,25 @@ void CefMediaRecorder::WorkerProc()
                     if (!stopping_.load())
                     {
                         if (core_.AudioPositionUs() + af_queued->duration <=
-                            video_end_norm_us + kAudioLeadAllowanceUs)
+                            video_end_norm_us)
                         {
                             af = PopAudio();
                             progressed = true;
                         }
-                        // else: gate full (audio at/over the video end + allowance)
-                        // -> hold; the timeline grows with the next video frames and
-                        // the chunk is admitted then (progressed stays false -> idle
-                        // sleep below).
+                        // else: gate full (audio at/over the video end) -> hold; the
+                        // timeline grows with the next video frames and the chunk is
+                        // admitted then (progressed stays false -> idle sleep below).
+                        // No lead allowance: orphan audio past the video end (its video
+                        // never arrives — popup lost frames) must not bake into the file
+                        // as a permanent audio lead.
                     }
                     else
                     {
                         PopAudio();
                         progressed = true;
-                        if (core_.AudioPositionUs() >=
-                            video_end_norm_us + kAudioLeadAllowanceUs)
+                        if (core_.AudioPositionUs() >= video_end_norm_us)
                         {
-                            // The gate is already past the video end: no coverage
+                            // The gate is already at/past the video end: no coverage
                             // ahead, the container timeline never reaches this frame
                             // -> drop.
                             const int64_t dropped =
@@ -1119,7 +1165,7 @@ void CefMediaRecorder::WorkerProc()
                         }
                         else
                         {
-                            // Fits before the end (fully inside or partially
+                            // Starts before the end (fully inside or partially
                             // overlapping): encode — the trailing samples past the end
                             // are bounded by one AAC frame (~23 ms) and trimmed by
                             // TruncateAudioToUs on the way out.
@@ -1148,10 +1194,10 @@ void CefMediaRecorder::WorkerProc()
         {
             if (video_end_norm_us != INT64_MIN)
             {
-                // Same bound the drain used (+ the lead allowance): content within
-                // the allowance was legitimately encoded, only the true surplus is
-                // trimmed.
-                core_.TruncateAudioToUs(video_end_norm_us + kAudioLeadAllowanceUs);
+                // Same bound the drain used: the audio track ends exactly at the video
+                // end (no lead allowance — only a partial-overlap chunk's trailing
+                // samples, bounded by one AAC frame, ever need trimming).
+                core_.TruncateAudioToUs(video_end_norm_us);
             }
             break;
         }
@@ -1167,23 +1213,18 @@ void CefMediaRecorder::WorkerProc()
     }
 
     // ---- Session diagnostics (one summary line per mechanism that fired) ----
-    if (forward_absorb_count_ > 0)
+    if (forward_absorb_count_ > 0 || gate_dropped_frames_ > 0 || crawl_episodes_ > 0 ||
+        backward_dropped_frames_ > 0 || frozen_gap_count_ > 0)
     {
         blog(LOG_INFO,
              "[cefmedia] recorder session summary: forward absorbs=%d, sweep dropped "
              "%lld ms, gate overflow dropped %lld frame(s) / %lld ms, crawl episodes=%d "
-             "(%lld paced frame(s))",
+             "(%lld paced frame(s)), backward jitter dropped %lld frame(s), frozen video "
+             "gaps=%lld (%lld ms)",
              forward_absorb_count_, (long long)(dropped_us_sweep_ / 1000),
              gate_dropped_frames_, (long long)(gate_dropped_us_ / 1000),
-             crawl_episodes_, crawl_steps_total_);
-    }
-    else if (gate_dropped_frames_ > 0 || crawl_episodes_ > 0)
-    {
-        blog(LOG_INFO,
-             "[cefmedia] recorder session summary: gate overflow dropped %lld frame(s) / "
-             "%lld ms, crawl episodes=%d (%lld paced frame(s))",
-             gate_dropped_frames_, (long long)(gate_dropped_us_ / 1000),
-             crawl_episodes_, crawl_steps_total_);
+             crawl_episodes_, crawl_steps_total_, backward_dropped_frames_,
+             frozen_gap_count_, (long long)(frozen_gap_us_total_ / 1000));
     }
 
     // ---- Finalize: flush encoders -> write trailer -> close file ----
