@@ -285,7 +285,8 @@ launch parameters first.
 
 ## Known Limits
 
-- x64 only (OBS 28+ has no 32-bit).
+- Windows 10/11 x64 today (OBS 28+ has no 32-bit builds); a macOS 13+ build
+  is on the way.
 - The output plugin fixes video size/framerate at the first frame; mid-stream resolution
   changes do not rebuild the stream (a source switch is handled by a fresh Start).
 - Color defaults to BT.709 limited range; the 10-bit I010 path awaits calibration.
