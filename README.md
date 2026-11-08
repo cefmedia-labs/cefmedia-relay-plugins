@@ -13,7 +13,7 @@ number). Up to five tabs capture in parallel with full pipeline isolation — ea
 channel has its own shared memory, ring buffers, libipc routes and receive threads.
 The source properties pick which channel a source displays (default 1); the recorder
 dock binds the recording to a channel and shows 5 occupancy dots mirroring the
-CefMedia Relay's live channel bitmap. All three ends (CEF patch, cefmedia.dll, this plugin)
+CefMedia Relay's live channel bitmap. All three ends (CefMedia Relay, cefmedia.dll, this plugin)
 must ship together — the channel routing lives in names and message fields.
 
 License: **GPL-2.0** (see `LICENSE`). Third-party components (cpp-ipc, OBS SDK,
@@ -291,10 +291,19 @@ launch parameters first.
 - Color defaults to BT.709 limited range; the 10-bit I010 path awaits calibration.
 - cefmedia.dll must be built with the plain Release|x64 configuration (logging is
   always on; no separate test configuration exists).
-- 5-channel capture needs all three ends from the same batch (CEF patch, cefmedia.dll,
+- 5-channel capture needs all three ends from the same batch (CefMedia Relay, cefmedia.dll,
   this plugin): channel routing rides on route-name suffixes and message fields, so an
   old cefmedia.dll broadcasts single-channel names the new plugin never hears (and vice
   versa).
 - A channel whose relay was torn down (tab closed while OBS still records it) shows a
   stalled recording; the plugin recovers automatically when that channel is re-acquired
   (same fault-tolerance path as a CefMedia Relay restart).
+- Only the page media's video and audio streams are captured. Content that lives
+  outside those streams — closed captions (CC), external subtitle tracks
+  (SRT/WebVTT), etc. — is not recorded.
+- Playback speed above 1x is applied by the page's own player, with player-side
+  caveats: adaptive-streaming players may drop to a lower video quality at high
+  rates, and live streams may ignore or reject rate changes. While a high rate is
+  active, live playback and the OBS preview can stutter — the recording itself is
+  generally unaffected, since frames are captured and muxed off the content
+  timeline, not the real-time presentation.
