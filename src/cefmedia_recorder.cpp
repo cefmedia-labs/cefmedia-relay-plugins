@@ -121,6 +121,13 @@ constexpr int64_t kSourceDivergeWaiveUs = 10 * 1000000;
 // audio flows again: the silence damage is bounded, and any residual content lead is
 // bounded by the queued depth at the waive moment.
 constexpr int64_t kHoldPadBudgetUs = 5 * 1000000;
+// Content-lead warn threshold: the source-domain hold pins the
+// encoded audio lead at <= ~1 frame interval; a chunk encoded further ahead of
+// the video high-water mark means a bypass path fired (diverge waiver, pad-budget
+// FIFO) or the source pts stream itself drifted from its content — the "audio
+// ahead of the picture" signature. The container trim bounds the audio TRACK
+// length, not the content placement, so it cannot mask this.
+constexpr int64_t kAudioLeadWarnUs = 250000;
 
 } // namespace
 
@@ -387,6 +394,10 @@ bool CefMediaRecorder::PushAudio(AVFrame* f)
             if (audio_q_.size() < kAudioQueueCap)
             {
                 audio_q_.push_back(f);
+                if (audio_q_.size() > audio_q_hwm_)
+                {
+                    audio_q_hwm_ = audio_q_.size();
+                }
                 qcv_.notify_one();
                 return true;
             }
@@ -700,6 +711,47 @@ void CefMediaRecorder::WorkerProc()
     int64_t padded_since_audio_us_ = 0;
     bool hold_waived_ = false;             // pad budget exhausted -> hold disabled
                                            // until real audio encodes again
+    // Content-lead probe: per encoded chunk, src pts minus the video
+    // source-PTS high-water mark = how far the audio CONTENT sits ahead of the
+    // picture it is placed against in the file. The hold pins this at <= 0;
+    // positive values only come from bypass paths (diverge waiver, pad-budget
+    // FIFO) or a source pts stream drifting from its content — the direct probe
+    // for the "audio ahead of the picture" symptom.
+    int64_t audio_lead_us_max_ = 0;
+    int64_t audio_lead_chunks_ = 0;
+    int64_t last_lead_log_ms_ = 0;
+    // Diverge-waiver observability: src gaps beyond kSourceDivergeWaiveUs used to
+    // bypass the hold silently (no count, no log).
+    int64_t diverge_waived_frames_ = 0;
+    int64_t last_diverge_log_ms_ = 0;
+    // Content-lead probe; called for every encoded audio chunk.
+    auto note_audio_lead = [&](AVFrame* af) {
+        if (!af || video_max_src_us == INT64_MIN)
+        {
+            return;
+        }
+        const int64_t lead_us = af->pts - video_max_src_us;
+        if (lead_us <= kAudioLeadWarnUs)
+        {
+            return;
+        }
+        ++audio_lead_chunks_;
+        if (lead_us > audio_lead_us_max_)
+        {
+            audio_lead_us_max_ = lead_us;
+        }
+        const int64_t now = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+        if (now - last_lead_log_ms_ > 1000)
+        {
+            last_lead_log_ms_ = now;
+            blog(LOG_WARNING,
+                 "[cefmedia] recorder: audio encoded %lld ms ahead of the last video "
+                 "frame's content (hold bypassed or source pts drift)",
+                 (long long)(lead_us / 1000));
+        }
+    };
     while (true)
     {
         // Progress flag for the idle wait below: an iteration that neither encoded a
@@ -1003,9 +1055,26 @@ void CefMediaRecorder::WorkerProc()
                             break;
                         }
                         const int64_t src_gap = af_queued->pts - vf->pts;
-                        if (!hold_waived_ && src_gap > 0 && src_gap <= kSourceDivergeWaiveUs)
+                        if (!hold_waived_ && src_gap > 0)
                         {
-                            break; // decode-side lookahead: hold for the render position
+                            if (src_gap <= kSourceDivergeWaiveUs)
+                            {
+                                break; // decode-side lookahead: hold for the render position
+                            }
+                            // Beyond the waive threshold: the source clocks diverged
+                            // and the hold would never release — bypass, but keep it
+                            // observable (this path used to be silent).
+                            ++diverge_waived_frames_;
+                            if (now_ms - last_diverge_log_ms_ > 1000)
+                            {
+                                last_diverge_log_ms_ = now_ms;
+                                blog(LOG_WARNING,
+                                     "[cefmedia] recorder: src gap %lld ms exceeds the %lld "
+                                     "ms diverge waive -> hold bypassed, audio may encode "
+                                     "ahead of its picture",
+                                     (long long)(src_gap / 1000),
+                                     (long long)(kSourceDivergeWaiveUs / 1000));
+                            }
                         }
                         if (core_.AudioPositionUs() + af_queued->duration >
                             video_end_norm_us)
@@ -1023,6 +1092,7 @@ void CefMediaRecorder::WorkerProc()
                         }
                         else
                         {
+                            note_audio_lead(af_queued);
                             core_.EncodeAudio(af_queued);
                             if (hold_waived_)
                             {
@@ -1180,6 +1250,7 @@ void CefMediaRecorder::WorkerProc()
             }
             if (af)
             {
+                note_audio_lead(af);
                 core_.EncodeAudio(af);
                 av_frame_free(&af);
             }
@@ -1213,18 +1284,29 @@ void CefMediaRecorder::WorkerProc()
     }
 
     // ---- Session diagnostics (one summary line per mechanism that fired) ----
+    // Audio queue high-water: how deep the decode-side backlog grew (speed and
+    // stall indicator). Read under the mutex; the callback threads may still push.
+    size_t audio_hwm = 0;
+    {
+        std::lock_guard<std::mutex> lk(qmutex_);
+        audio_hwm = audio_q_hwm_;
+    }
     if (forward_absorb_count_ > 0 || gate_dropped_frames_ > 0 || crawl_episodes_ > 0 ||
-        backward_dropped_frames_ > 0 || frozen_gap_count_ > 0)
+        backward_dropped_frames_ > 0 || frozen_gap_count_ > 0 ||
+        audio_lead_chunks_ > 0 || diverge_waived_frames_ > 0)
     {
         blog(LOG_INFO,
              "[cefmedia] recorder session summary: forward absorbs=%d, sweep dropped "
              "%lld ms, gate overflow dropped %lld frame(s) / %lld ms, crawl episodes=%d "
              "(%lld paced frame(s)), backward jitter dropped %lld frame(s), frozen video "
-             "gaps=%lld (%lld ms)",
+             "gaps=%lld (%lld ms), audio lead >250ms %lld chunk(s) (max %lld ms), "
+             "diverge-waived %lld chunk(s), audio queue hwm=%zu",
              forward_absorb_count_, (long long)(dropped_us_sweep_ / 1000),
              gate_dropped_frames_, (long long)(gate_dropped_us_ / 1000),
              crawl_episodes_, crawl_steps_total_, backward_dropped_frames_,
-             frozen_gap_count_, (long long)(frozen_gap_us_total_ / 1000));
+             frozen_gap_count_, (long long)(frozen_gap_us_total_ / 1000),
+             audio_lead_chunks_, (long long)(audio_lead_us_max_ / 1000),
+             diverge_waived_frames_, audio_hwm);
     }
 
     // ---- Finalize: flush encoders -> write trailer -> close file ----

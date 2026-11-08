@@ -118,6 +118,8 @@ private:
     // re-acquires), source display is not starved.
     std::deque<AVFrame*> video_q_;
     std::deque<AVFrame*> audio_q_;
+    // Audio queue high-water mark (decode-side lead indicator). Guarded by qmutex_.
+    size_t audio_q_hwm_ = 0;
     std::mutex qmutex_;
     std::condition_variable qcv_;
     static constexpr size_t kVideoQueueCap = 300;   // video queue (frames)
