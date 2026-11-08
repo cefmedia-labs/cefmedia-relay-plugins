@@ -1176,13 +1176,24 @@ void CefMediaRecorder::WorkerProc()
             else
             {
                 // Video timeline live. Mid-recording: encode only what the video
-                // timeline already covers — the gate is the CONTAINER position
-                // (AudioPositionUs, sample-count timeline, epoch-free) against
-                // video_end: audio ahead of the end is decode-side lookahead, held in
-                // the queue until video frames arrive to cover it. (The previous
-                // per-frame norm comparison depended on the shared video_base, whose
-                // meaning changes at every re-anchor — the sample-count position has
-                // no epochs and is the same bound the video branch uses.)
+                // timeline already covers, under the same two bounds the video branch
+                // applies (a single gate is not enough — each one breaks in the
+                // other's pathology):
+                //   a) Source-domain alignment hold against the video source-PTS
+                //      high-water mark (there is no current frame here): a chunk whose
+                //      src pts is ahead of the last encoded video frame is decode-side
+                //      lookahead and waits, waived past kSourceDivergeWaiveUs (the
+                //      source clocks diverged) or when the pad budget already waived
+                //      the hold. Without this, a re-anchor seam — the video queue is
+                //      momentarily empty right after a seek — let the lookahead
+                //      through the container gate's residual room and baked a brief
+                //      future-audio blip into the file right after every seek.
+                //   b) Container bound: AudioPositionUs (sample-count timeline,
+                //      epoch-free) + this chunk must not run past the video end.
+                //      (The previous per-frame norm comparison depended on the shared
+                //      video_base, whose meaning changes at every re-anchor — the
+                //      sample-count position has no epochs and is the same bound the
+                //      video branch uses.)
                 // STOPPING: every frame must leave the queue (encode or drop) or the
                 // exit condition below can never fire — in particular a frame that
                 // PARTIALLY overlaps the video end (starts before it, ends after it)
@@ -1193,18 +1204,45 @@ void CefMediaRecorder::WorkerProc()
                 {
                     if (!stopping_.load())
                     {
-                        if (core_.AudioPositionUs() + af_queued->duration <=
-                            video_end_norm_us)
+                        const int64_t src_gap = af_queued->pts - video_max_src_us;
+                        const bool hold =
+                            !hold_waived_ && src_gap > 0 &&
+                            src_gap <= kSourceDivergeWaiveUs;
+                        const bool diverge =
+                            !hold_waived_ && src_gap > kSourceDivergeWaiveUs;
+                        if (!hold)
                         {
-                            af = PopAudio();
-                            progressed = true;
+                            if (diverge)
+                            {
+                                // Beyond the waive threshold: the source clocks
+                                // diverged and the hold would never release — bypass,
+                                // but keep it observable (mirrors the video branch).
+                                ++diverge_waived_frames_;
+                                if (now_ms - last_diverge_log_ms_ > 1000)
+                                {
+                                    last_diverge_log_ms_ = now_ms;
+                                    blog(LOG_WARNING,
+                                         "[cefmedia] recorder: src gap %lld ms exceeds "
+                                         "the %lld ms diverge waive -> hold bypassed "
+                                         "(no-video drain), audio may encode ahead of "
+                                         "its picture",
+                                         (long long)(src_gap / 1000),
+                                         (long long)(kSourceDivergeWaiveUs / 1000));
+                                }
+                            }
+                            if (core_.AudioPositionUs() + af_queued->duration <=
+                                video_end_norm_us)
+                            {
+                                af = PopAudio();
+                                progressed = true;
+                            }
+                            // else: gate full (audio at/over the video end) -> hold;
+                            // the timeline grows with the next video frames and the
+                            // chunk is admitted then (progressed stays false -> idle
+                            // sleep below). No lead allowance: orphan audio past the
+                            // video end (its video never arrives — popup lost frames)
+                            // must not bake into the file as a permanent audio lead.
                         }
-                        // else: gate full (audio at/over the video end) -> hold; the
-                        // timeline grows with the next video frames and the chunk is
-                        // admitted then (progressed stays false -> idle sleep below).
-                        // No lead allowance: orphan audio past the video end (its video
-                        // never arrives — popup lost frames) must not bake into the file
-                        // as a permanent audio lead.
                     }
                     else
                     {
