@@ -354,8 +354,12 @@ bool start(void* data)
         obs_output_set_last_error(d->output, "Failed to load cefmedia.dll");
         return false;
     }
-    const std::string codec = ResolveCodec(d->vcodec);
-    if (codec.empty())
+    // The video-encoder probe only gates recordings that actually encode video
+    // ("va"/"v"). Source = Audio Only skips it: a machine without any H.264
+    // encoder (slim FFmpeg build, broken NVENC/QSV driver) must still be able to
+    // record audio-only — the AAC encoder is independent of the H.264 probe.
+    const std::string codec = (d->source != "a") ? ResolveCodec(d->vcodec) : "";
+    if (d->source != "a" && codec.empty())
     {
         blog(LOG_WARNING, "[cefmedia] output start failed: no usable video encoder");
         obs_output_set_last_error(d->output,
