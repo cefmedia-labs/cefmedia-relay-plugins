@@ -242,11 +242,20 @@ void CefMediaIpcClient::VideoRecvThreadProc(CefMediaIpcClient* self, int channel
     ChannelState& st = self->channels_[channel];
     // Broadcast route: CefMedia Relay is the single writer, this plugin a reader.
     ipc::route chan(VideoRouteName(channel).c_str(), ipc::receiver);
+    blog(LOG_INFO, "[cefmedia] ipc client: ch%d video recv loop enter", channel);
+    int empty_cycles = 0;
     while (!st.stop_requested.load()) {
         ipc::buff_t msg = chan.recv(kRecvTimeoutMs);
         if (msg.empty()) {
+            // 5s no-data diagnostic: pin down zombie-receiver/starvation cases
+            // (OBS hard-killed while recording, then relaunched).
+            if (++empty_cycles % 50 == 0) {
+                blog(LOG_WARNING, "[cefmedia] ipc client: ch%d video recv empty x%d ",
+                     channel, empty_cycles);
+            }
             continue; // timeout: check stop
         }
+        empty_cycles = 0;
         if (msg.size() < CEFMEDIA_VIDEO_HEADER_SIZE) {
             continue; // truncated: drop
         }
@@ -272,11 +281,17 @@ void CefMediaIpcClient::AudioRecvThreadProc(CefMediaIpcClient* self, int channel
 {
     ChannelState& st = self->channels_[channel];
     ipc::route chan(AudioRouteName(channel).c_str(), ipc::receiver);
+    int empty_cycles = 0;
     while (!st.stop_requested.load()) {
         ipc::buff_t msg = chan.recv(kRecvTimeoutMs);
         if (msg.empty()) {
+            if (++empty_cycles % 50 == 0) {
+                blog(LOG_WARNING, "[cefmedia] ipc client: ch%d audio recv empty x%d ",
+                     channel, empty_cycles);
+            }
             continue;
         }
+        empty_cycles = 0;
         if (msg.size() < CEFMEDIA_AUDIO_HEADER_SIZE) {
             continue;
         }
