@@ -68,6 +68,9 @@ enum {
 	CefFrameFlag_Ad   = 1 << 1, // reserved: ad-showing at capture time (the renderer
 	                            // currently filters ads at the source, so this stays 0
 	                            // until the ad path needs to signal mid-stream)
+	CefFrameFlag_Drm  = 1 << 2, // DRM-protected content: payload is black; the relay
+	                            // replaces it with a "DRM protected" placeholder
+	                            // before delivery (EME streams are never captured)
 };
 
 // Explicit planar layout. Video payload bytes are laid out as per-plane
