@@ -1,14 +1,19 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #ifndef CEFMEDIA_CONSUMER_H
 #define CEFMEDIA_CONSUMER_H
 
 #include <obs.h>
 
+#include <array>
 #include <atomic>
 #include <functional>
 #include <mutex>
 #include <vector>
 
 #include "cefmedia_api.h"
+#include "channel_frame_binding.h" // per-channel callback+reader lifecycle (RAII)
 #include "frontend_api.h"
 #include "timeline.h"
 
@@ -91,11 +96,20 @@ private:
     std::vector<obs_source_t*> fit_queued_; // sources with auto-fit already queued (tracked
                                             // per source lifetime)
     CefMediaApi& api_ = CefMediaApi::Instance();
-    bool started_[CEFMEDIA_CHANNEL_COUNT] = {}; // per-channel reader held
     // Output timeline per channel: absorbs PTS forward jumps (seek / break), keeps output
     // continuous with audio and video sharing one base. One per channel — two channels'
     // streams carry unrelated PTS epochs and would corrupt a shared timeline.
     OutputTimeline timeline_[CEFMEDIA_CHANNEL_COUNT];
+    // Per-channel reader binding (frame callbacks + reader reference). "Started"
+    // == bindings_[ch].channel() >= 0. Normally detached before static teardown:
+    // OBS destroys sources (-> RemoveSource -> StopCapture) before unloading
+    // modules, so the destructor-time Detach is a no-op in the normal path.
+    // LAST member on purpose (reverse destruction order): Detach must run while
+    // timeline_ (touched by in-flight callbacks) is still alive.
+    ChannelFrameBinding bindings_[CEFMEDIA_CHANNEL_COUNT]{
+        {&VideoCallback, &AudioCallback, this}, {&VideoCallback, &AudioCallback, this},
+        {&VideoCallback, &AudioCallback, this}, {&VideoCallback, &AudioCallback, this},
+        {&VideoCallback, &AudioCallback, this}};
 };
 
 #endif // CEFMEDIA_CONSUMER_H

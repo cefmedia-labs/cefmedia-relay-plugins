@@ -113,9 +113,12 @@
     <ClCompile Include="src\cefmedia_output.cpp" />
     <ClCompile Include="src\cefmedia_detect.cpp" />
     <ClCompile Include="src\cefmedia_recorder.cpp" />
+    <ClCompile Include="src\channel_frame_binding.cpp" />
+    <ClCompile Include="src\channel_preview.cpp" />
     <ClCompile Include="src\frame_convert.cpp" />
     <ClCompile Include="src\frontend_api.cpp" />
     <ClCompile Include="src\recorder_dock.cpp" />
+    <ClCompile Include="src\recorder_prefs.cpp" />
     <ClCompile Include="src\recorder_ffmpeg.cpp" />
     <ClCompile Include="src\path_util.cpp" />
     <ClCompile Include="src\timeline.cpp" />
@@ -130,9 +133,12 @@
     <ClInclude Include="src\cefmedia_recorder.h" />
     <ClInclude Include="src\cefmedia_register.h" />
     <ClInclude Include="src\cefmedia_source.h" />
+    <ClInclude Include="src\channel_frame_binding.h" />
+    <ClInclude Include="src\channel_preview.h" />
     <ClInclude Include="src\frame_convert.h" />
     <ClInclude Include="src\frontend_api.h" />
     <ClInclude Include="src\recorder_dock.h" />
+    <ClInclude Include="src\recorder_prefs.h" />
     <ClInclude Include="src\recorder_ffmpeg.h" />
     <ClInclude Include="src\path_util.h" />
     <ClInclude Include="src\timeline.h" />

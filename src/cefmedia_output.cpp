@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #include "cefmedia_output.h"
 
 #include <obs-module.h>
@@ -16,6 +19,8 @@
 #include "cefmedia.h"
 #include "cefmedia_api.h"
 #include "cefmedia_recorder.h"
+#include "channel_frame_binding.h" // reader binding (callbacks + reader ref, RAII)
+#include "recorder_prefs.h"        // MenuPrefs + recorder.cfg load/save
 #include "frontend_api.h"
 #include "recorder_dock.h"
 #include "cefmedia_detect.h"
@@ -33,35 +38,9 @@ constexpr int kFrontendFinishedLoading = 26;
 // any output mode). Frames/recording are handled by the registered cefmedia_output type;
 // this code only creates/starts/stops/releases the output and persists format/encoder/
 // bitrate preferences.
-struct MenuPrefs {
-    std::string format = "mkv";
-    std::string vcodec = "auto";
-    int vbitrate_kbps = 8000;
-    int abitrate_kbps = 160;
-    // Playback speed in permille (1000 = 1x); Phase B maps it to CefMedia Relay.
-    // Valid set {1000, 1500, 2000, 3000} (1x / 1.5x / 2x / 3x). Only applied to
-    // CefMedia Relay while recording (the dock gates the RateSet call on
-    // RecorderIsRecording); stopping the recording restores 1x in CefMedia Relay
-    // while the combo keeps this selection for the next start.
-    int speed_permille = 1000;
-    std::string folder; // output folder (empty = %USERPROFILE%\Videos\CefMedia default)
-    std::string source = "va"; // which streams to record: "va" (video+audio) / "v" / "a"
-    // Capture channel the recorder binds to: 0-based 0..4 (UI shows 1..5; the
-    // cfg key stores the 1-based UI value). CefMedia Relay routes exactly the tab
-    // owning this channel into the recording. Default channel 1 (0-based 0) —
-    // single-channel use is unchanged.
-    int channel = 0;
-    // Stop the recording automatically when a video frame carries CefFrameFlag_End (the
-    // renderer's playback-ended notification fires after the last frame of the
-    // current video).
-    bool autostop = false;
-    // CefMedia Relay executable path (empty = never auto-launch). When set, a recording start
-    // that sees no frames arriving launches CefMedia Relay with --enable-cefmedia (the
-    // Chromium ProcessSingleton folds a redundant launch into the running instance, so
-    // this is safe even when CefMedia Relay is already up but merely silent).
-    std::string cefmedia_path;
-};
-MenuPrefs g_prefs;
+// The preference model + cfg file IO live in recorder_prefs.{h,cpp}; this alias
+// keeps the control-surface call sites below unchanged.
+MenuPrefs& g_prefs = RecorderPrefs();
 obs_output_t* g_menu_output = nullptr;
 struct CefMediaOutputData; // forward declaration (full definition below)
 // Private data of the menu output (recorded at create). Used to finalize the recorder
@@ -91,176 +70,22 @@ bool g_menu_recording = false;
 // control surface and calls into it (see FrontendEventCallback / RecorderStartNew).
 // The detection module reads/persists cefmedia_path through the accessors below.
 
-// Reliable config entry when there is no UI: %APPDATA%\obs-studio\plugin_config\
-// cefmedia-relay-plugins\recorder.cfg (line format key=value, supports
-// format/vcodec/vbitrate/abitrate). Re-read before each menu start, so an edit takes
-// effect on the next click. First run writes defaults for the user to edit.
-
-// Default output folder: %USERPROFILE%\Videos\CefMedia (the historical hard-coded
-// location, kept as the fallback when nothing is configured). USERPROFILE is read
-// as UTF-8 (EnvUtf8) — getenv would return the ANSI code page string and mangle
-// a non-ASCII user name.
-static std::string DefaultRecordFolder()
-{
-    const std::string home = EnvUtf8("USERPROFILE");
-    return (home.empty() ? std::string("C:") : home) + "\\Videos\\CefMedia";
-}
-
-// Effective output folder: the configured value, or the default when empty.
-static std::string EffectiveRecordFolder()
-{
-    return g_prefs.folder.empty() ? DefaultRecordFolder() : g_prefs.folder;
-}
-
-// (directory creation / file IO live in path_util.{h,cpp} — UTF-8 paths, wide
-// Win32 calls underneath; the ANSI code page would mangle non-ASCII user names).
-
-void LoadRecorderPrefs(MenuPrefs& p)
-{
-    const std::string appdata = EnvUtf8("APPDATA");
-    if (appdata.empty())
-    {
-        return;
-    }
-    const std::string dir =
-        appdata + "\\obs-studio\\plugin_config\\cefmedia-relay-plugins";
-    MakeDirRecursive(dir); // ignore if it already exists
-    const std::string path = dir + "\\recorder.cfg";
-
-    FILE* f = OpenFileUtf8(path, "r");
-    if (!f)
-    {
-        f = OpenFileUtf8(path, "w"); // first run: write defaults, visible and editable
-        if (f)
-        {
-            fprintf(f, "# CefMedia Recorder config (re-read on the next menu click)\n");
-            fprintf(f, "format=%s\n", p.format.c_str());
-            fprintf(f, "vcodec=%s\n", p.vcodec.c_str());
-            fprintf(f, "vbitrate=%d\n", p.vbitrate_kbps);
-            fprintf(f, "abitrate=%d\n", p.abitrate_kbps);
-            fprintf(f, "speed_permille=%d\n", p.speed_permille);
-            fprintf(f, "channel=%d\n", p.channel + 1); // UI value (1-based)
-            fprintf(f, "folder=%s\n", DefaultRecordFolder().c_str());
-            fprintf(f, "source=%s\n", p.source.c_str());
-            fprintf(f, "autostop=%d\n", p.autostop ? 1 : 0);
-            fprintf(f, "cefmedia_path=%s\n", p.cefmedia_path.c_str());
-            fclose(f);
-        }
-        return;
-    }
-    char line[256];
-    while (fgets(line, sizeof(line), f))
-    {
-        char key[64] = {0};
-        char val[512] = {0};
-        if (sscanf(line, " %63[^= \t\r\n] = %511[^\r\n]", key, val) != 2)
-        {
-            continue;
-        }
-        if (strcmp(key, "format") == 0)
-        {
-            p.format = val;
-        }
-        else if (strcmp(key, "vcodec") == 0)
-        {
-            p.vcodec = val;
-        }
-        else if (strcmp(key, "vbitrate") == 0)
-        {
-            p.vbitrate_kbps = atoi(val);
-        }
-        else if (strcmp(key, "abitrate") == 0)
-        {
-            p.abitrate_kbps = atoi(val);
-        }
-        else if (strcmp(key, "speed_permille") == 0)
-        {
-            p.speed_permille = atoi(val); // new permille key wins over the legacy key
-        }
-        else if (strcmp(key, "speed") == 0)
-        {
-            // Legacy integer multiplier key (1/2/3); only applied when the permille
-            // key was not seen (the check below distinguishes "unset" = default 1000
-            // which is also a legit value, so track the legacy application order
-            // instead: legacy read happens first in file order, permille overrides).
-            const int legacy = atoi(val);
-            if (legacy >= 1 && legacy <= 3)
-            {
-                p.speed_permille = legacy * 1000;
-            }
-        }
-        else if (strcmp(key, "folder") == 0)
-        {
-            std::string v = val;
-            // Path values keep inner spaces (unlike the %s keys), so trim both ends
-            // manually (editor artifacts / trailing whitespace).
-            const size_t b = v.find_first_not_of(" \t");
-            const size_t e = v.find_last_not_of(" \t");
-            p.folder = (b == std::string::npos) ? std::string() : v.substr(b, e - b + 1);
-        }
-        else if (strcmp(key, "source") == 0)
-        {
-            p.source = val;
-        }
-        else if (strcmp(key, "channel") == 0)
-        {
-            // 1-based UI value (1..5); 0-based internally. Out-of-range falls
-            // back to channel 0 via the clamp below.
-            const int ui = atoi(val);
-            p.channel = (ui >= 1 && ui <= CEFMEDIA_CHANNEL_COUNT) ? ui - 1 : 0;
-        }
-        else if (strcmp(key, "autostop") == 0)
-        {
-            p.autostop = atoi(val) != 0;
-        }
-        else if (strcmp(key, "browser_path") == 0)
-        {
-            // Legacy key (pre 1.0.1): same semantics as cefmedia_path; the
-            // new key later in the file overrides, so both spellings coexist.
-            std::string v = val;
-            const size_t b = v.find_first_not_of(" \t");
-            const size_t e = v.find_last_not_of(" \t");
-            p.cefmedia_path = (b == std::string::npos) ? std::string() : v.substr(b, e - b + 1);
-        }
-        else if (strcmp(key, "cefmedia_path") == 0)
-        {
-            std::string v = val;
-            // Path values keep inner spaces (same trimming as folder).
-            const size_t b = v.find_first_not_of(" \t");
-            const size_t e = v.find_last_not_of(" \t");
-            p.cefmedia_path = (b == std::string::npos) ? std::string() : v.substr(b, e - b + 1);
-        }
-    }
-    fclose(f);
-    if (p.format != "mkv" && p.format != "mp4")
-    {
-        p.format = "mkv"; // invalid container, fall back
-    }
-    if (p.speed_permille != 1000 && p.speed_permille != 1500 && p.speed_permille != 2000 &&
-        p.speed_permille != 3000)
-    {
-        p.speed_permille = 1000; // invalid speed multiplier, fall back
-    }
-    if (p.source != "va" && p.source != "v" && p.source != "a")
-    {
-        p.source = "va"; // invalid source selection, fall back
-    }
-    if (p.channel < 0 || p.channel >= CEFMEDIA_CHANNEL_COUNT)
-    {
-        p.channel = 0; // invalid channel, fall back (defensive; parse clamps too)
-    }
-    blog(LOG_INFO,
-         "[cefmedia] recorder prefs: format=%s vcodec=%s vbit=%d abit=%d speed=%d permille "
-         "source=%s channel=%d autostop=%d",
-         p.format.c_str(), p.vcodec.c_str(), p.vbitrate_kbps, p.abitrate_kbps,
-         p.speed_permille, p.source.c_str(), p.channel + 1, p.autostop ? 1 : 0);
-}
-
 struct CefMediaOutputData {
+    CefMediaOutputData()
+        // The binding stores &recorder (its callbacks are static members of
+        // CefMediaRecorder); |recorder| is declared before |reader|, so the
+        // pointer is valid from construction through destruction.
+        : reader(&CefMediaRecorder::VideoCallback, &CefMediaRecorder::AudioCallback,
+                 &recorder)
+    {
+    }
+
     obs_output_t* output = nullptr;
     CefMediaRecorder recorder;
-    bool reader_held_ = false; // whether this output holds a reader reference (ReaderStop
-                               // released exactly once)
+    // Reader binding (frame-callback registration + reader reference), bound
+    // at start(). Declared right after |recorder| (its callbacks cast to the
+    // recorder) and detached first on destruction — see ChannelFrameBinding.
+    ChannelFrameBinding reader;
     int channel = 0;           // capture channel this recording is bound to (0-based)
 
     std::string path;
@@ -277,23 +102,14 @@ static void OnRecorderError(void* obj);
 static void StopMenuRecording();
 
 // ReaderStop exactly once (both the error path and the normal stop go through here;
-// idempotent). Releases the reader reference on the recording's bound channel and
-// unregisters the recorder's frame callbacks (mandatory before the recorder dies —
-// a left-behind registry entry would be a dangling pointer on the next frame).
+// idempotent — ChannelFrameBinding::Detach). Unregisters the recorder's frame
+// callbacks (mandatory before the recorder dies — a left-behind registry entry would
+// be a dangling pointer on the next frame) and releases the reader reference
+// (refcount--; the channel's threads stay alive while the source plugin — or another
+// recording — still holds one).
 void ReleaseReader(CefMediaOutputData* d)
 {
-    if (d->reader_held_)
-    {
-        d->reader_held_ = false;
-        CefMediaApi::Instance().RemoveVideoFrameCallback(&CefMediaRecorder::VideoCallback,
-                                                         &d->recorder, d->channel);
-        CefMediaApi::Instance().RemoveAudioFrameCallback(&CefMediaRecorder::AudioCallback,
-                                                         &d->recorder, d->channel);
-        CefMediaApi::Instance().ReaderStop(d->channel); // refcount--; the channel's threads
-                                                        // stay alive while the source plugin
-                                                        // (or another recording) still holds
-                                                        // one
-    }
+    d->reader.Detach();
 }
 
 // Resolve vcodec: "auto" -> probe the fallback chain (NVENC -> QSV -> x264).
@@ -367,15 +183,11 @@ bool start(void* data)
         return false;
     }
 
-    // Register reader callbacks on the bound channel (idempotent append) +
+    // Bind the reader to the recording's channel: registers the frame callbacks
+    // (idempotent append; only the bound channel's frames reach the recorder) +
     // ReaderStart(channel) (refcount++; the first consumer on that channel
-    // spawns its threads). Only the bound channel's frames reach the recorder.
-    CefMediaApi::Instance().SetVideoFrameCallback(&CefMediaRecorder::VideoCallback,
-                                                  &d->recorder, d->channel);
-    CefMediaApi::Instance().SetAudioFrameCallback(&CefMediaRecorder::AudioCallback,
-                                                  &d->recorder, d->channel);
-    CefMediaApi::Instance().ReaderStart(d->channel);
-    d->reader_held_ = true;
+    // spawns its threads). Idempotent (ChannelFrameBinding::Attach).
+    d->reader.Attach(d->channel);
 
     d->recorder.SetAutoStop(d->autostop);
     d->recorder.StartRecord(d->path, d->format, codec, d->vbitrate_kbps, d->abitrate_kbps,
@@ -611,8 +423,9 @@ static void OnMenuOutputStop(void*, calldata_t*)
     // heartbeat stops with the recording; without this CefMedia Relay would stay at the
     // last applied rate). RateSet is a libipc push (non-blocking); safe from any
     // thread; no-ops when the CefMedia Relay is absent. Channel-routed: only the
-    // recorded tab resets (other tabs' own rates are untouched).
-    CefMediaApi::Instance().RateSet(1000, g_prefs.channel);
+    // recorded tab resets (other tabs' own rates are untouched). recording=false
+    // clears the relay-side recording latch (toolbar lock + recording badge).
+    CefMediaApi::Instance().RateSet(1000, g_prefs.channel, /*recording=*/false);
     RecorderDockNotifyStateChanged(); // two-state menu text + dock button sync
 }
 
@@ -651,7 +464,7 @@ void RecorderFinalizeIfPendingImpl()
     blog(LOG_INFO, "[cefmedia] recorder: auto-stop finalize (UI thread)");
     StopMenuRecording(); // StopRecord (immediate join of the exited worker) + ReleaseReader
     g_menu_recording = false;
-    CefMediaApi::Instance().RateSet(1000, g_prefs.channel); // restore 1x on the recorded
+    CefMediaApi::Instance().RateSet(1000, g_prefs.channel, false); // restore 1x on the recorded
                                                             // channel (same as any other stop)
     RecorderDockNotifyStateChanged();
 }
@@ -661,10 +474,6 @@ void RecorderFinalizeIfPendingImpl()
 // Outside the anonymous namespace: recorder_dock.cpp calls these via the header. ----
 
 } // namespace
-
-// SaveRecorderPrefs is defined below (RecorderSetChannel and the other
-// RecorderSet* call it before the definition — keep the forward declaration).
-static void SaveRecorderPrefs(const MenuPrefs& p);
 
 // Auto-stop finalizer: called by the dock's 1 s timer (UI thread) to complete an
 // async stop requested from the reader thread (RequestStopAsync). No-op when there is
@@ -682,7 +491,7 @@ bool RecorderStartNew()
     }
     // Re-read the config file on every start (no settings UI: edit recorder.cfg to change
     // format/encoder/bitrate).
-    LoadRecorderPrefs(g_prefs);
+    LoadRecorderPrefs();
 
     obs_data_t* s = obs_data_create();
     obs_data_set_string(s, "format", g_prefs.format.c_str());
@@ -745,7 +554,7 @@ void RecorderStopCurrent()
     g_menu_recording = false;
     // Restore 1x in CefMedia Relay on the recorded channel (speed applies only while
     // recording; see OnMenuOutputStop for the error-stop counterpart).
-    CefMediaApi::Instance().RateSet(1000, g_prefs.channel);
+    CefMediaApi::Instance().RateSet(1000, g_prefs.channel, false);
     RecorderDockNotifyStateChanged(); // two-state menu text + dock button sync
 }
 
@@ -790,38 +599,9 @@ void RecorderSetChannel(int channel)
         return;
     }
     g_prefs.channel = channel;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO, "[cefmedia] recorder channel set to %d (effective on the next start)",
          channel + 1);
-}
-
-static void SaveRecorderPrefs(const MenuPrefs& p)
-{
-    const std::string appdata = EnvUtf8("APPDATA");
-    if (appdata.empty())
-    {
-        return;
-    }
-    const std::string path = appdata +
-        "\\obs-studio\\plugin_config\\cefmedia-relay-plugins\\recorder.cfg";
-    FILE* f = OpenFileUtf8(path, "w");
-    if (!f)
-    {
-        return;
-    }
-    fprintf(f, "# CefMedia Recorder config (re-read on the next menu click)\n");
-    fprintf(f, "format=%s\n", p.format.c_str());
-    fprintf(f, "vcodec=%s\n", p.vcodec.c_str());
-    fprintf(f, "vbitrate=%d\n", p.vbitrate_kbps);
-    fprintf(f, "abitrate=%d\n", p.abitrate_kbps);
-    fprintf(f, "speed_permille=%d\n", p.speed_permille);
-    fprintf(f, "channel=%d\n", p.channel + 1); // UI value (1-based)
-    fprintf(f, "folder=%s\n", p.folder.empty() ? DefaultRecordFolder().c_str()
-                                               : p.folder.c_str());
-    fprintf(f, "source=%s\n", p.source.c_str());
-    fprintf(f, "autostop=%d\n", p.autostop ? 1 : 0);
-    fprintf(f, "cefmedia_path=%s\n", p.cefmedia_path.c_str());
-    fclose(f);
 }
 
 void RecorderSetSpeed(int speed_permille)
@@ -839,7 +619,7 @@ void RecorderSetSpeed(int speed_permille)
         return;
     }
     g_prefs.speed_permille = speed_permille;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO,
          "[cefmedia] recorder speed set to %d permille (applied to CefMediaRelay while "
          "recording; stopping restores 1x)",
@@ -858,7 +638,7 @@ void RecorderSetAutoStop(bool enabled)
         return;
     }
     g_prefs.autostop = enabled;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     // Push to the LIVE recording too: the End frame is a one-shot, so deferring the
     // switch to the next start would miss it — the toggle must be visible to the
     // running recorder's OnVideoFrame (auto_stop_ is atomic). The recorder member
@@ -876,7 +656,7 @@ void RecorderSetAutoStop(bool enabled)
 // auto-launch probe, so a manual cfg edit between OBS sessions is picked up).
 std::string RecorderCefMediaPath()
 {
-    LoadRecorderPrefs(g_prefs);
+    LoadRecorderPrefs();
     return g_prefs.cefmedia_path;
 }
 
@@ -890,7 +670,7 @@ void RecorderSetCefMediaPath(const std::string& path)
         return;
     }
     g_prefs.cefmedia_path = path;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO, "[cefmedia] recorder cefmedia_path set to %s",
          path.empty() ? "(disabled)" : path.c_str());
 }
@@ -911,7 +691,7 @@ void RecorderSetFormat(const std::string& format)
         return;
     }
     g_prefs.format = format;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO, "[cefmedia] recorder format set to %s (effective on the next start)",
          format.c_str());
 }
@@ -932,7 +712,7 @@ void RecorderSetSource(const std::string& source)
         return;
     }
     g_prefs.source = source;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO, "[cefmedia] recorder source set to %s (effective on the next start)",
          source.c_str());
 }
@@ -954,7 +734,7 @@ void RecorderSetVcodec(const std::string& vcodec)
         return;
     }
     g_prefs.vcodec = v;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO, "[cefmedia] recorder vcodec set to %s (effective on the next start)",
          v.c_str());
 }
@@ -972,7 +752,7 @@ void RecorderSetVbitrate(int vbitrate_kbps)
         return;
     }
     g_prefs.vbitrate_kbps = v;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO, "[cefmedia] recorder vbitrate set to %d kbps (effective on the next start)", v);
 }
 
@@ -989,7 +769,7 @@ void RecorderSetAbitrate(int abitrate_kbps)
         return;
     }
     g_prefs.abitrate_kbps = a;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO, "[cefmedia] recorder abitrate set to %d kbps (effective on the next start)", a);
 }
 
@@ -1019,7 +799,7 @@ bool RecorderSetFolder(const std::string& folder)
         return true;
     }
     g_prefs.folder = folder;
-    SaveRecorderPrefs(g_prefs);
+    SaveRecorderPrefs();
     blog(LOG_INFO, "[cefmedia] recorder folder set to %s", folder.c_str());
     return true;
 }
@@ -1131,7 +911,7 @@ void UnregisterCefMediaOutput()
             StopMenuRecording(); // obs_output_active is unreliable for raw outputs, finalize
                                  // directly
             // Module unload mid-recording: restore 1x like any other stop path.
-            CefMediaApi::Instance().RateSet(1000, g_prefs.channel);
+            CefMediaApi::Instance().RateSet(1000, g_prefs.channel, false);
         }
         obs_output_release(g_menu_output);
         g_menu_output = nullptr;

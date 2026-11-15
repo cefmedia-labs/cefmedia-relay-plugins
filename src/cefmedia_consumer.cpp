@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #include "cefmedia_consumer.h"
 
 #include "cefmedia.h"
@@ -138,8 +141,8 @@ void CefVideoConsumer::ForEachSource(const std::function<void(obs_source_t*)>& f
 
 void CefVideoConsumer::StartIfNeeded(int channel)
 {
-    if (started_[channel]) {
-        return;
+    if (bindings_[channel].channel() >= 0) {
+        return; // already bound
     }
     if (!api_.Load()) {
         // Load is a no-op facade (no external DLL) and cannot fail; kept
@@ -149,23 +152,20 @@ void CefVideoConsumer::StartIfNeeded(int channel)
     }
     // Re-anchor this channel's output timeline on each capture session.
     timeline_[channel].Reset();
-    // Register the reader callbacks on this channel and start its receive
-    // threads. The reader threads retry with timeout polls internally: when the
-    // CefMedia Relay is not running / restarts, OBS arriving first still
-    // attaches automatically.
-    api_.SetVideoFrameCallback(&CefVideoConsumer::VideoCallback, this, channel);
-    api_.SetAudioFrameCallback(&CefVideoConsumer::AudioCallback, this, channel);
-    api_.ReaderStart(channel);
-    started_[channel] = true;
+    // Bind the reader to this channel: registers the frame callbacks and starts
+    // its receive threads (ChannelFrameBinding::Attach). The reader threads
+    // retry with timeout polls internally: when the CefMedia Relay is not
+    // running / restarts, OBS arriving first still attaches automatically.
+    bindings_[channel].Attach(channel);
 }
 
 void CefVideoConsumer::StopCapture(int channel)
 {
-    if (!started_[channel]) {
-        return;
-    }
-    api_.ReaderStop(channel);
-    started_[channel] = false;
+    // Idempotent full unbind: unregisters the frame callbacks (the pre-binding
+    // code left them registered here, relying on the singleton lifetime and the
+    // idempotent re-register in StartIfNeeded) and releases the reader
+    // reference (joins the receive threads). Must be called OUTSIDE the lock.
+    bindings_[channel].Detach();
 }
 
 void CefVideoConsumer::VideoCallback(cefmedia_video_frame* frame, const uint8_t* payload,
