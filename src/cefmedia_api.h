@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #ifndef CEFMEDIA_API_H
 #define CEFMEDIA_API_H
 
@@ -36,7 +39,10 @@ public:
     void StatusStop();
 
     // ---- speed control (OBS -> CefMedia Relay, libipc "cefmedia.rate"; channel-routed) ----
-    void RateSet(int rate_permille, int channel);
+    // |recording| rides the rate message (recording-state signalling): true on
+    // the dock heartbeat / speed changes while recording, false on every
+    // stop/restore-1x path.
+    void RateSet(int rate_permille, int channel, bool recording);
 
 private:
     CefMediaApi() = default;

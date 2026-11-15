@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #include "cefmedia_api.h"
 
 #include "cefmedia_ipc_client.h"
@@ -63,7 +66,7 @@ void CefMediaApi::StatusStop()
     CefMediaIpcClient::Instance().StatusStop();
 }
 
-void CefMediaApi::RateSet(int rate_permille, int channel)
+void CefMediaApi::RateSet(int rate_permille, int channel, bool recording)
 {
-    CefMediaIpcClient::Instance().RateSet(rate_permille, channel);
+    CefMediaIpcClient::Instance().RateSet(rate_permille, channel, recording);
 }

@@ -135,10 +135,18 @@ typedef struct {
 // |channel| routes the rate to one capture channel (0-based
 // 0..4; CefMedia Relay applies it to the tab owning that channel). Senders
 // that leave channel=0 keep working against channel 0.
+//
+// |recording|: 1 = the sender is actively recording this channel. The dock
+// heartbeat re-fires every second while recording (any speed, 1x included),
+// so CefMedia Relay can latch per-channel recording state with the same
+// expiry pattern as the speed latch — an OBS crash mid-recording clears the
+// state within the expiry instead of locking the browser UI forever.
 typedef struct {
 	int32_t rate_permille; // playback rate in permille (1000 = 1x)
 	int32_t channel;       // 0-based capture channel this rate applies to
-	uint8_t reserved[88];  // pad to 96 bytes (room for future commands; a
+	uint32_t recording;    // 1 = sender is recording this channel (heartbeat
+	                       // refreshed); 0 = stopped / restore-1x paths
+	uint8_t reserved[84];  // pad to 96 bytes (room for future commands; a
 	                       // future command set would add a cmd tag first)
 } cefmedia_rate_msg;
 

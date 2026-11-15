@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #ifndef CEFMEDIA_IPC_CLIENT_H
 #define CEFMEDIA_IPC_CLIENT_H
 
@@ -66,8 +69,12 @@ public:
     void StatusStop();
 
     // Send the playback rate to CefMedia Relay for one capture channel
-    // (fire-and-forget; best effort).
-    void RateSet(int rate_permille, int channel);
+    // (fire-and-forget; best effort). |recording| rides the same message
+    // (rate-msg recording field, 2026-11-15): the dock heartbeat re-fires every
+    // second while recording (any speed, 1x included) with recording=true, the
+    // stop/restore-1x paths send recording=false — CefMedia Relay latches
+    // per-channel recording state from it (10s expiry self-heals an OBS crash).
+    void RateSet(int rate_permille, int channel, bool recording);
 
 private:
     CefMediaIpcClient() = default;
@@ -88,6 +95,11 @@ private:
         std::thread* audio_thread = nullptr;
         std::atomic<int> refcount{0};
         std::atomic<bool> stop_requested{false};
+        // Serializes ReaderStart's spawn against ReaderStop's join+delete on
+        // this channel: the refcount is atomic, but the thread-pair slot is
+        // not — callers may run on different threads (e.g. the preview's
+        // detach worker vs. a source attaching on the OBS UI thread).
+        std::mutex reader_mutex;
     };
 
     static void VideoRecvThreadProc(CefMediaIpcClient* self, int channel);
