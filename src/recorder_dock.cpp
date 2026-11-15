@@ -1,7 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #include "recorder_dock.h"
 
 // Qt (OBS ships the Qt 6 runtime; the panel links Qt6Core/Gui/Widgets import libs and
 // resolves to OBS's DLLs at load time — nothing Qt needs to be deployed with the plugin).
+#include <QtWidgets/QAbstractItemView>
 #include <QtWidgets/QComboBox>
 #include <QtWidgets/QCheckBox>
 #include <QtWidgets/QDialog>
@@ -16,10 +20,13 @@
 #include <QtWidgets/QMenu>
 #include <QtWidgets/QPushButton>
 #include <QtWidgets/QSpinBox>
+#include <QtWidgets/QToolButton>
 #include <QtWidgets/QVBoxLayout>
 #include <QtWidgets/QWidget>
 #include <QtCore/QByteArray>
 #include <QtCore/QDir>
+#include <QtCore/QEvent>
+#include <QtCore/QObject>
 #include <QtCore/QTimer>
 #include <QtCore/QUrl>
 #include <QtGui/QDesktopServices>
@@ -29,12 +36,14 @@
 #include <QtWidgets/QStyle> // unpolish/polish for dynamic-property restyle
 
 #include <atomic>
+#include <functional>
 #include <string>
 #include <vector>
 
 #include "cefmedia_output.h"
 #include "cefmedia_detect.h" // CefMediaRelay install/run check (relay-missing hint row)
 #include "cefmedia_api.h"
+#include "channel_preview.h" // live channel preview popup + ChannelCombo (Qt TU #2)
 #include "frontend_api.h" // brings obs.h + util/config-file.h (config_get_string)
 #include "i18n.h"
 
@@ -304,9 +313,9 @@ private:
 // Layout: a Start/Stop toggle button above a QGridLayout with a shared label column
 // (col 0) and a stretching control column (col 1) — labels align left at equal width,
 // controls fill the remaining width, and every row gets the same height from the grid.
-// The frequently-touched settings (Channel / Speed / Autostop) stay in the grid (the
-// Settings button rides the Speed row); the rest (Source / Format / Encoder / bitrates
-// / Folder) live in the RecorderSettingsDialog.
+// The frequently-touched settings (Channel / Speed / Settings / Autostop) stay in
+// the grid (one row each since 2026-11-14); the rest (Source / Format / Encoder /
+// bitrates / Folder) live in the RecorderSettingsDialog.
 class RecorderPanel : public QWidget
 {
 public:
@@ -344,7 +353,7 @@ public:
         int row = 0;
         // -- settings --
         grid->addWidget(new QLabel(T("Dock.Channel"), this), row, 0);
-        channel_box_ = new QComboBox(this);
+        channel_box_ = new ChannelCombo(this);
         for (int i = 1; i <= CEFMEDIA_CHANNEL_COUNT; ++i) {
             // Label is the 1-based UI channel number ("1".."5"). CefMedia Relay's
             // favicon badge shows the same number on the owning tab. Each item
@@ -353,20 +362,15 @@ public:
             // shows the selected channel's state too.
             channel_box_->addItem(MakeChannelStateIcon(false), QString::number(i));
         }
-        // Channel row and Speed row share the control column; each row's trailing
-        // part (the 5 occupancy dots vs the Settings button) would otherwise leave
-        // the two combos at different widths (both are "column width minus trailing").
-        // Reserve the SAME trailing width on both rows — the max of the two natural
-        // widths: the Settings button gets that fixed width, the dots row gets a
-        // fixed spacer of the difference, so both combos render equal-width.
-        const int kRowSpacing = 4; // matches the QHBoxLayout spacings below
-        const int dots_w = CEFMEDIA_CHANNEL_COUNT * kDotDiameter +
-                           (CEFMEDIA_CHANNEL_COUNT - 1) * kRowSpacing;
+        // Channel row and Speed row share the control column. The Settings button
+        // used to ride the Speed row with a trailing-width equalization dance so
+        // both combos rendered equal width; since 2026-11-14 the Speed combo grew
+        // wide with the VOD note, so Settings got its own grid row and the channel
+        // row keeps only the (narrow) dots cluster — no width equalization needed.
         settings_btn_ = new QPushButton(T("Dock.Settings"), this);
         settings_btn_->setStyleSheet(kButtonStyleIdle);
         settings_btn_->setToolTip(T("Dock.Tooltip.Settings"));
-        const int trailing_w = qMax(settings_btn_->sizeHint().width(), dots_w);
-        settings_btn_->setFixedWidth(trailing_w);
+        const int kRowSpacing = 4; // matches the QHBoxLayout spacings below
 
         channel_box_->setCurrentIndex(RecorderChannel()); // 0-based index == UI-1
         // Occupancy indicator rides the Channel row (right of the combo): 5 dots
@@ -383,24 +387,21 @@ public:
             channel_row->addWidget(dot);
             occupancy_dots_.push_back(dot);
         }
-        // Right-align the dots with the (wider) Settings button: pad the difference
-        // on the right so the dots' right edge matches the button's right edge and
-        // both rows' combos end at the same x.
-        if (trailing_w > dots_w)
-        {
-            channel_row->addSpacerItem(new QSpacerItem(trailing_w - dots_w, 1,
-                                                       QSizePolicy::Fixed,
-                                                       QSizePolicy::Minimum));
-        }
         grid->addLayout(channel_row, row++, 1);
-        // The occupancy dots share the Channel row (column 1), and the Settings
-        // button rides the Speed row — the settings grid rows run:
-        // Channel / Speed(+Settings) / Autostop. Source/Format/Encoder/bitrates/
-        // Folder live in the Settings dialog (less-frequent settings).
+        // The occupancy dots share the Channel row (column 1) — the settings grid
+        // rows run: Channel / Speed / Settings / Autostop. Source/Format/Encoder/
+        // bitrates/Folder live in the Settings dialog (less-frequent settings).
 
         grid->addWidget(new QLabel(T("Dock.Speed"), this), row, 0);
         speed_box_ = new QComboBox(this);
         speed_box_->addItem("1.0x"); // index 0 -> 1000 permille
+        // Speeds above 1x are Media-mode VOD only: page capture samples the
+        // compositor at a wall-clock rate, so >1x is only meaningful for Media
+        // mode VOD recording — the browser refuses Page switches on speed-latched
+        // channels and clamps >1x rates in Page mode. The old inline per-item note
+        // (2026-11-14) made every >1x item very wide; the full hint now lives as
+        // the combo's own tooltip (hover only). Hint text via the plugin locale
+        // (en-US is the canonical fallback for locales this key was not added to).
         speed_box_->addItem("1.5x"); // index 1 -> 1500 permille
         speed_box_->addItem("2.0x"); // index 2 -> 2000 permille
         speed_box_->addItem("3.0x"); // index 3 -> 3000 permille
@@ -409,15 +410,16 @@ public:
             const int idx = sp == 1500 ? 1 : (sp == 2000 ? 2 : (sp == 3000 ? 3 : 0));
             speed_box_->setCurrentIndex(idx);
         }
-        // The Settings button shares the Speed row (right end, fixed width — see the
-        // trailing-width note above the Channel row): settings are opened rarely, so
-        // a compact trailing button reads as an affordance without earning its own
-        // grid row.
-        auto* speed_row = new QHBoxLayout();
-        speed_row->setSpacing(kRowSpacing);
-        speed_row->addWidget(speed_box_, 1); // combo fills the leading width
-        speed_row->addWidget(settings_btn_, 0);
-        grid->addLayout(speed_row, row++, 1);
+        speed_box_->setToolTip(
+            QStringLiteral("<p>%1</p>")
+                .arg(QString::fromUtf8(T("Dock.SpeedHint"))));
+        grid->addWidget(speed_box_, row++, 1);
+
+        // Action rows (Settings / Autostop) span the full grid width so their left
+        // edge lines up with the Start Recording button above — the panel reads as
+        // two row types: labeled parameter rows (Channel / Speed / Output) and
+        // full-width action rows (Start / Settings / Autostop / relay hint).
+        grid->addWidget(settings_btn_, row++, 0, 1, 2);
 
         // Auto-stop toggle: when checked, the recording ends by itself when CefMedia Relay
         // reports the current video playback end (End-flag frame) — a full episode is
@@ -426,7 +428,7 @@ public:
         autostop_check_->setToolTip(
             T("Dock.Autostop"));
         autostop_check_->setChecked(RecorderAutoStop());
-        grid->addWidget(autostop_check_, row++, 1);
+        grid->addWidget(autostop_check_, row++, 0, 1, 2);
 
         // -- recording info (single Output row: actual recorded content time / file
         //    size; hidden until the first recording starts, kept with the final values
@@ -463,12 +465,13 @@ public:
         // start-time check reported CefMedia Relay missing.
         grid->setRowMinimumHeight(output_row_, 0);
         grid->setRowMinimumHeight(hint_row_, 0);
-        // Lock the label column width to the widest label across ALL rows (otherwise
-        // different label texts would give column 0 a ragged width). Labeled rows:
-        // Channel (0) / Speed (1) / Output (3); the auto-stop row (2) and the hint
-        // row (4) have no col-0 label.
+        // Lock the label column width to the widest label across ALL labeled rows
+        // (otherwise different label texts would give column 0 a ragged width).
+        // Labeled rows: Channel (0) / Speed (1) / Output (output_row_); the action
+        // rows (Settings / Autostop) and the hint row span both columns, so they
+        // have no col-0 label to measure.
         int label_w = 0;
-        for (int labeled_row : {0, 1, 3})
+        for (int labeled_row : {0, 1, output_row_})
         {
             auto* item = grid->itemAtPosition(labeled_row, 0);
             if (!item || !item->widget())
@@ -493,6 +496,26 @@ public:
             RecorderSetChannel(index); // 0-based index == 0-based channel
             channel_box_->setEnabled(!RecorderIsRecording());
         });
+        // Live channel preview while the dropdown is open (ChannelPreviewWindow):
+        // the popup follows the highlighted item (hover/keyboard), shows black
+        // for a free channel, and closes with the dropdown itself. Keyboard
+        // navigation arrives through QComboBox::highlighted; mouse hover does
+        // NOT reliably fire it — QAbstractItemView::entered (with mouse
+        // tracking on the popup view) is the hover path.
+        connect(channel_box_, &QComboBox::highlighted, this,
+                [this](int index) { UpdatePreview(index); });
+        if (QAbstractItemView* popup_view = channel_box_->view())
+        {
+            popup_view->setMouseTracking(true);
+            connect(popup_view, &QAbstractItemView::entered, this,
+                    [this](const QModelIndex& index) { UpdatePreview(index.row()); });
+        }
+        static_cast<ChannelCombo*>(channel_box_)->popup_shown = [this] {
+            UpdatePreview(channel_box_->currentIndex());
+        };
+        static_cast<ChannelCombo*>(channel_box_)->popup_hidden = [this] {
+            ClosePreview();
+        };
 
         connect(settings_btn_, &QPushButton::clicked, this, [this] {
             RecorderSettingsDialog dialog(this);
@@ -510,16 +533,17 @@ public:
         // the next start; stopping a recording restores 1x in CefMedia Relay (control
         // surface) while this combo keeps its selection for the next run. RateSet
         // no-ops when CefMedia Relay / control export is absent, so a missing relay is
-        // safe. The 1 s timer's HeartbeatTick re-applies every 3 s while recording and
-        // not 1x (covers page navigation / new tabs resetting the site player's rate).
+        // safe. The 1 s timer's HeartbeatTick re-applies every 1 s while recording and
+        // not 1x (covers page navigation / new tabs resetting the site player's rate;
+        // tightened from 3 s on 2026-11-14 — the browser-side speed latch refreshes
+        // per RateSet, so a faster heartbeat shortens the unprotected window).
         connect(speed_box_, &QComboBox::currentIndexChanged, this, [this](int index) {
             static constexpr int kPermille[] = {1000, 1500, 2000, 3000};
             const int permille = (index >= 0 && index < 4) ? kPermille[index] : 1000;
             RecorderSetSpeed(permille); // persist only
             if (RecorderIsRecording())
             {
-                ApplyRateNow();
-                heartbeat_tick_ = 0; // user action: restart the 3 s cadence immediately
+                ApplyRateNow(); // immediate apply; the 1 s heartbeat takes over
             }
         });
 
@@ -589,6 +613,21 @@ private:
     }
 
 public:
+    ~RecorderPanel() override
+    {
+        // The popup is a TOP-LEVEL window (not a widget child), so OBS freeing
+        // the dock would leak it — destroy it here. Direct delete (not
+        // deleteLater): OBS is tearing the dock down and the deferred-delete
+        // queue may never run again; the destructor unbinds synchronously
+        // (removes the frame callback + joins the receive threads).
+        if (preview_)
+        {
+            ChannelPreviewWindow* window = preview_;
+            preview_ = nullptr;
+            delete window;
+        }
+    }
+
     // One refresh covers both the periodic timer and the button click; the button state
     // is re-derived every tick so a Tools-menu toggle (or an error stop) is reflected
     // within 1 s without any cross-notification. Duration shows the ACTUAL recorded
@@ -668,29 +707,74 @@ public:
     // rate channel (permille: 1000/1500/2000/3000), routed to the recorded
     // channel's tab. Callers gate this on RecorderIsRecording —
     // CefMedia Relay rate only changes while recording (stop paths restore 1x via
-    // the control surface). No-op when the CefMedia Relay is absent; the heartbeat
-    // retries.
+    // the control surface). recording=true rides the message (recording-state
+    // signalling): the browser latches per-channel recording state from the
+    // heartbeat and locks its toolbar UI while it is fresh. No-op when the
+    // CefMedia Relay is absent; the heartbeat retries.
     void ApplyRateNow()
     {
-        CefMediaApi::Instance().RateSet(RecorderSpeed(), RecorderChannel());
+        CefMediaApi::Instance().RateSet(RecorderSpeed(), RecorderChannel(),
+                                        /*recording=*/true);
     }
 
-    // Called from the 1 s timer: while RECORDING and the speed is not 1x, re-send every
-    // 3 s so page navigations / new tabs (which reset the site player's rate) get
-    // re-applied. Not recording: stay silent — the stop path already restored 1x and a
-    // heartbeat would fight it (the combo selection only applies from the next start).
+    // Called from the 1 s timer: while RECORDING, re-send every second (any
+    // speed — 1x included, 2026-11-15) so page navigations / new tabs (which
+    // reset the site player's rate) get re-applied and the browser-side
+    // recording latch (toolbar lock + recording badge) stays fresh. Not
+    // recording: stay silent — the stop path already sent recording=false and
+    // restored 1x (a heartbeat would fight it; the combo selection only applies
+    // from the next start).
     void HeartbeatTick()
     {
-        if (!RecorderIsRecording() || RecorderSpeed() == 1000)
+        if (!RecorderIsRecording())
         {
-            heartbeat_tick_ = 0;
             return;
         }
-        if (++heartbeat_tick_ >= 3)
+        ApplyRateNow(); // 1 s heartbeat while recording (covers navigation /
+                        // new-tab rate resets and keeps the browser-side speed
+                        // latch + recording latch alive)
+    }
+
+    // ---- channel preview popup (ChannelPreviewWindow / ChannelCombo, see channel_preview.h) ----
+    // Live preview tied to the Channel dropdown's open state: shown as soon as
+    // the dropdown opens, following the highlighted item (hover/keyboard),
+    // black for a free channel, gone when the dropdown closes. Frames flow only
+    // while the dropdown is open — the committed selection is untouched.
+    void UpdatePreview(int channel)
+    {
+        if (!preview_)
         {
-            heartbeat_tick_ = 0;
-            ApplyRateNow();
+            preview_ = new ChannelPreviewWindow();
+            preview_->setAttribute(Qt::WA_DeleteOnClose);
+            // Keep the panel pointer honest when the popup is dismissed
+            // (deleteLater runs the destructor — and the mandatory unbind —
+            // back on the UI thread).
+            connect(preview_, &QObject::destroyed, this,
+                    [this] { preview_ = nullptr; });
         }
+        preview_->show();
+        // Occupancy decision stays on the panel side (the CefMedia Relay
+        // bitmap is dock state): the window only consumes the verdict.
+        const unsigned int bitmap = g_panel_bitmap.load(std::memory_order_relaxed);
+        preview_->FollowChannel(channel,
+                                channel >= 0 && ((bitmap >> channel) & 1u));
+        // Snug against the Channel combo's right edge, tops aligned. move() on
+        // a top-level window positions the frame's top-left corner, which is
+        // exactly the alignment we want.
+        preview_->move(channel_box_->mapToGlobal(
+            QPoint(channel_box_->width() + 4, 0)));
+        preview_->raise();
+    }
+
+    void ClosePreview()
+    {
+        if (!preview_)
+        {
+            return;
+        }
+        ChannelPreviewWindow* window = preview_;
+        preview_ = nullptr; // before close(): destroyed() fires via deleteLater
+        window->close();    // WA_DeleteOnClose -> unbind in the destructor
     }
 
     // Occupancy dots + Channel combo icons: repaint from the latest bitmap
@@ -733,13 +817,13 @@ public:
     QLabel* output_label_ = nullptr;
     QLabel* hint_label_ = nullptr; // relay-missing hint (spans both columns)
     QTimer* timer_ = nullptr;
+    ChannelPreviewWindow* preview_ = nullptr; // channel preview popup (top-level; may be null)
     int hint_row_ = 0;             // grid row of the relay-missing hint (show/hide)
     std::vector<QLabel*> occupancy_dots_;
     // Last painted combo-icon state per channel (constructor starts every item
     // with the free icon, so the cache starts all-false and the first tick with
     // a lit channel swaps in the occupied icon).
     std::vector<bool> channel_states_ = std::vector<bool>(CEFMEDIA_CHANNEL_COUNT, false);
-    int heartbeat_tick_ = 0;
     int output_row_ = 0;           // grid row of the Output info (for show/hide)
     int row_height_cached_ = 0;    // uniform row height (combo sizeHint)
     bool has_recorded_ = false;    // any recording started this OBS session
@@ -753,6 +837,91 @@ RecorderPanel* g_panel = nullptr; // valid between Create/Destroy (ownership: OB
 
 // (g_panel_bitmap is declared above the panel class — the callback in its
 // constructor references it.)
+
+// Startup geometry settling: re-apply the saved dock layout once the main
+// window has reached its final size.
+//
+// QMainWindow::restoreState restores the splitter positions recorded at exit,
+// but those absolute widths only survive the layout pass when the window is at
+// the same size it had at save time. A plugin dock misses OBS's own startup
+// restore (it does not exist yet when OBSBasic restores its state in the
+// constructor), so CreateRecorderDock below re-applies the saved state itself —
+// and that re-apply runs while the window may still be settling towards its
+// restored geometry (a restored maximize state, for instance, is applied by
+// the window manager after show()). When the re-apply fits the layout into a
+// smaller-than-saved window, the dock is clamped to its minimumSizeHint; the
+// surplus width arriving with the final window size is then spread evenly
+// across the dock row by Qt's geometry calculator, so the dock comes back
+// wider than the user left it — and that widened width is what gets recorded
+// at exit. Re-running restoreState once the window geometry has gone quiet
+// restores the recorded widths exactly (zero surplus at the saved window
+// size), which is what this watcher does. Docks OBS restored at startup need
+// no such fix: their state application is deferred by Qt until the window
+// reaches its final size.
+//
+// Not a Q_OBJECT: eventFilter() is a plain virtual override and both timers are
+// lambda-connected, so no moc run is needed. The watcher is parented to the
+// main window, holds only the DockState bytes, and removes itself after one
+// re-apply (or the hard cap), so it needs no cleanup on module unload.
+class DockSettleWatcher : public QObject
+{
+public:
+    DockSettleWatcher(QMainWindow* main, QByteArray dock_state)
+        : QObject(main), main_(main), dock_state_(dock_state)
+    {
+        main_->installEventFilter(this);
+        quiet_.setSingleShot(true);
+        quiet_.setInterval(kQuietMs);
+        connect(&quiet_, &QTimer::timeout, this, [this] { Finish(); });
+        cap_.setSingleShot(true);
+        cap_.setInterval(kCapMs);
+        connect(&cap_, &QTimer::timeout, this, [this] { Finish(); });
+        quiet_.start();
+        cap_.start();
+    }
+
+    bool eventFilter(QObject* watched, QEvent* event) override
+    {
+        if (watched == main_ && event->type() == QEvent::Resize)
+        {
+            resized_ = true;
+            quiet_.start(); // geometry still moving; wait for it to go quiet
+        }
+        return false;
+    }
+
+private:
+    void Finish()
+    {
+        if (finished_)
+        {
+            return;
+        }
+        finished_ = true;
+        main_->removeEventFilter(this);
+        if (resized_)
+        {
+            // Idempotent for the docks OBS already laid out at startup, and
+            // exact for the widths at the settled window size. Known cost: a
+            // manual dock drag within the first kCapMs of startup is reverted
+            // by this re-apply.
+            main_->restoreState(dock_state_);
+        }
+        deleteLater();
+    }
+
+    // Silence window before the re-apply fires after the last window resize.
+    static constexpr int kQuietMs = 300;
+    // Hard cap on how long after startup the re-apply may still fire.
+    static constexpr int kCapMs = 10000;
+
+    QMainWindow* main_;
+    QByteArray dock_state_;
+    QTimer quiet_;
+    QTimer cap_;
+    bool resized_ = false;
+    bool finished_ = false;
+};
 
 } // namespace
 
@@ -808,6 +977,15 @@ void CreateRecorderDock()
                 dock->show();
                 dock->raise();
             }
+        }
+        if (dock_state && *dock_state)
+        {
+            // The re-apply above can land while the window is still settling
+            // towards its restored geometry, which loses the recorded dock
+            // widths (they get clamped to the minimum and the arriving surplus
+            // is spread across the row). Watch the geometry go quiet and
+            // re-apply once more at the final size — see DockSettleWatcher.
+            new DockSettleWatcher(main, QByteArray::fromBase64(dock_state));
         }
     });
 }

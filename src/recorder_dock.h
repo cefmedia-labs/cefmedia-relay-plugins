@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #ifndef RECORDER_DOCK_H
 #define RECORDER_DOCK_H
 
@@ -10,9 +13,11 @@ constexpr const char* kMenuRecording = "Menu.Stop";
 // Qt dock recorder panel (Start/Stop toggle + Format/Speed/Folder selectors + Output
 // display: recorded content time / file size).
 //
-// Qt is deliberately quarantined in recorder_dock.cpp: no Qt headers leak into other
-// translation units, and the panel class has no Q_OBJECT (signals connected via lambdas)
-// so no moc step is needed. The panel is registered with OBS through the runtime-resolved
+// Qt is deliberately quarantined into two designated translation units:
+// recorder_dock.cpp and channel_preview.{h,cpp} (the live Channel preview popup).
+// No Qt headers leak into other translation units, and the panel classes have no
+// Q_OBJECT (signals connected via lambdas / std::function hooks) so no moc step is
+// needed. The panel is registered with OBS through the runtime-resolved
 // obs_frontend_add_dock_by_id; OBS owns the dock and the widget afterwards (its main
 // window holds them in a shared_ptr list and frees them on shutdown).
 //
