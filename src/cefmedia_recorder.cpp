@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #include "cefmedia_recorder.h"
 
 #include <obs-module.h>
@@ -57,6 +60,14 @@ bool PlaneSpecs(AVPixelFormat fmt, int w, int h, PlaneSpec out[4], int* planes)
 constexpr int64_t kSyncGapThresholdUs = 30000;   // pad silence only when audio lags video >30 ms
 constexpr int64_t kMaxSyncGapUs = 2 * 1000000;   // max silence per pad, 2 s
 constexpr int64_t kFirstFrameTimeoutMs = 1000;   // first-frame single-side timeout
+// va-mode audio-absence cap (2026-11-13): Page-mode capture of audio-less pages
+// (static pages / docs / dashboards) keeps video frames flowing while audio
+// chunks NEVER arrive. The original "no single-side timeout in va" rule assumed
+// audio always exists and let the worker spin until stop with zero output
+// (recorded files with no data). Once the first video frame is in, give audio
+// this long to show up, then degrade to a video-only chain. The video-side
+// absence stays unbounded (the start-race must not degrade to audio-only).
+constexpr int64_t kVaAudioWaitMs = 5000;
 // CFR interval measurement window (adapted CFR): wait this long / this many frames for
 // the header fps to stabilize before opening the encode chain. The renderer's
 // FrameRateEstimator needs 3-15 samples to converge, so 1 s @30 fps (30 frames) is
@@ -474,12 +485,17 @@ void CefMediaRecorder::WorkerProc()
     bool seen = false;
     bool no_frame_warned = false;
     const auto t0 = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point first_v_time;
 
     while (!stopping_.load())
     {
         if (!first_v && want_video_)
         {
             first_v = PopVideo();
+            if (first_v)
+            {
+                first_v_time = std::chrono::steady_clock::now();
+            }
         }
         if (!first_a && want_audio_)
         {
@@ -488,6 +504,29 @@ void CefMediaRecorder::WorkerProc()
         if ((!want_video_ || first_v) && (!want_audio_ || first_a))
         {
             break;
+        }
+        // va-mode audio-absence degrade (2026-11-13): the first video frame has
+        // arrived but audio chunks never show up (Page-mode capture of
+        // audio-less pages). Waiting forever means the worker spins until stop
+        // with zero output. Give audio kVaAudioWaitMs past the first video
+        // frame, then start a video-only chain (audio chunks arriving later
+        // are dropped by the want_audio_ gate). The video-side wait stays
+        // unbounded: a start-race must not degrade the recording to
+        // audio-only.
+        if (want_video_ && want_audio_ && first_v && !first_a)
+        {
+            const auto wait_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - first_v_time)
+                                     .count();
+            if (wait_ms >= kVaAudioWaitMs)
+            {
+                blog(LOG_WARNING,
+                     "[cefmedia] recorder: no audio chunk within %lld s of the first"
+                     " video frame -> starting video-only chain (audio-less page?)",
+                     (long long)(kVaAudioWaitMs / 1000));
+                want_audio_ = false;
+                break;
+            }
         }
         // Both-sides mode ("va"): no single-side timeout — video stalling >1 s while
         // audio flowed must NOT degrade the recording to an audio-only chain (the
@@ -531,12 +570,18 @@ void CefMediaRecorder::WorkerProc()
         }
     }
 
+    // Free the not-yet-consumed first frames (single clean-up for both early
+    // exits below: the pre-stream abort and the Open failure).
+    auto free_first_frames = [&] {
+        if (first_v) av_frame_free(&first_v);
+        if (first_a) av_frame_free(&first_a);
+    };
+
     if (stopping_.load() || (!first_v && !first_a))
     {
         blog(LOG_INFO, "[cefmedia] recorder worker exit (no frames: v=%d a=%d stopping=%d)",
              first_v != NULL, first_a != NULL, stopping_.load());
-        if (first_v) av_frame_free(&first_v);
-        if (first_a) av_frame_free(&first_a);
+        free_first_frames();
         return;
     }
 
@@ -634,8 +679,7 @@ void CefMediaRecorder::WorkerProc()
         blog(LOG_ERROR, "[cefmedia] recorder: FFmpeg stream setup failed (no encoder / invalid "
              "params) w=%d h=%d sr=%d ch=%d codec=%s",
              w, h, sr, ch, vcodec_.c_str());
-        if (first_v) av_frame_free(&first_v);
-        if (first_a) av_frame_free(&first_a);
+        free_first_frames();
         NotifyError();
         return;
     }

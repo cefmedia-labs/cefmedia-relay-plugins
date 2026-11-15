@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #include "cefmedia_detect.h"
 
 #include <obs-module.h>
@@ -192,7 +195,12 @@ void ProbeThread(int64_t start_tick, std::string exe_path)
     {
         ~GuardReset() { g_probe_running.store(false, std::memory_order_release); }
     } guard;
-    constexpr int kProbeWindowMs = 4000;
+    // Silence window before the launch prompt. Safe to keep short: on timeout
+    // the probe re-checks the process list first (a booting relay is never
+    // prompted, a running-but-silent one is left alone), and a redundant launch
+    // folds into the running instance anyway. 2 s: just above a slow page's
+    // first-frame latency, half the old wait-to-prompt.
+    constexpr int kProbeWindowMs = 2000;
     for (int waited = 0; waited < kProbeWindowMs; waited += 250)
     {
         std::this_thread::sleep_for(std::chrono::milliseconds(250));

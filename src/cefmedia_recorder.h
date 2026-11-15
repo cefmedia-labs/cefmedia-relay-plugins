@@ -1,3 +1,6 @@
+// SPDX-License-Identifier: GPL-2.0
+// Copyright (C) 2026 CefMedia Labs. Part of the cefmedia-relay-plugins
+// repository (see the repository LICENSE).
 #ifndef CEFMEDIA_RECORDER_H
 #define CEFMEDIA_RECORDER_H
 
@@ -139,7 +142,12 @@ private:
     std::string path_, container_, vcodec_;
     int vbitrate_kbps_ = 0, abitrate_kbps_ = 0;
     bool want_video_ = true; // source selection snapshot: which sides to record
-    bool want_audio_ = true;
+                             // (written in StartRecord only, before any thread runs)
+    // Audio-side selection snapshot. ATOMIC: unlike want_video_ this one is also
+    // written mid-recording by the worker thread (the va-mode audio-absence
+    // degrade flips it off), while the audio receive thread reads it as an
+    // enqueue gate — a plain bool would be a data race.
+    std::atomic<bool> want_audio_{true};
     std::atomic<bool> auto_stop_{false}; // stop the recording on an End-flag video frame
 
     // Engine
