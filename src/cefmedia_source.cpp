@@ -20,6 +20,21 @@ const char* cefmedia_source_getname(void*)
 // (1..5); internally mapped to the 0-based channel (value - 1) everywhere else.
 constexpr const char* kChannelSetting = "channel";
 
+// Source-settings key of the per-source stream filter (what this source
+// outputs: both streams / video only / audio only). Values match
+// CefVideoConsumer::SourceOutputMode; 0 = both keeps pre-existing sources
+// (setting absent) behaving as before.
+constexpr const char* kOutputModeSetting = "output_mode";
+
+int ClampOutputMode(int64_t mode)
+{
+    if (mode < CefVideoConsumer::kOutputBoth ||
+        mode > CefVideoConsumer::kOutputAudioOnly) {
+        return CefVideoConsumer::kOutputBoth;
+    }
+    return static_cast<int>(mode);
+}
+
 // create/destroy/update run on the OBS main thread; async frames are pushed on the
 // per-channel ipc receive threads, so the source only registers/unregisters on the
 // singleton consumer with its channel binding.
@@ -38,7 +53,9 @@ void* cefmedia_source_create(obs_data_t* settings, obs_source_t* source)
     if (ch < 0 || ch >= CEFMEDIA_CHANNEL_COUNT) {
         ch = 0; // default channel 1 (0-based 0)
     }
-    CefVideoConsumer::Instance().AddSource(source, ch);
+    const int mode =
+        ClampOutputMode(obs_data_get_int(settings, kOutputModeSetting));
+    CefVideoConsumer::Instance().AddSource(source, ch, mode);
     UNUSED_PARAMETER(settings);
     return source;
 }
@@ -55,6 +72,8 @@ void cefmedia_source_destroy(void* data)
 void cefmedia_source_update(void* data, obs_data_t* settings)
 {
     // Channel change: rebind the source to the newly selected capture channel.
+    // Output-mode change: per-source stream filter, takes effect from the next
+    // frame on (no reader restart involved).
     // auto_fit is read at first-frame auto-fit time and needs no handling here.
     obs_source_t* source = reinterpret_cast<obs_source_t*>(data);
     if (!source) {
@@ -65,6 +84,8 @@ void cefmedia_source_update(void* data, obs_data_t* settings)
         ch = 0;
     }
     CefVideoConsumer::Instance().UpdateSourceChannel(source, ch);
+    CefVideoConsumer::Instance().UpdateSourceOutputMode(
+        source, ClampOutputMode(obs_data_get_int(settings, kOutputModeSetting)));
 }
 
 static obs_properties_t* cefmedia_source_get_properties(void*)
@@ -93,6 +114,20 @@ static obs_properties_t* cefmedia_source_get_properties(void*)
                  ((bitmap >> (i - 1)) & 1u) ? "● " : "○ ", i);
         obs_property_list_add_int(channel, label, i);
     }
+    // Stream filter: which of the channel's streams this source outputs.
+    // Both is the default (pre-existing sources keep their behavior); the two
+    // only-modes exist to avoid a doubled same-channel audio mix when a tab
+    // is on screen twice, and to let audio be captured without a picture.
+    // Item labels reuse the recorder-output locale keys (same phrases).
+    obs_property_t* output = obs_properties_add_list(
+        props, kOutputModeSetting, T("Props.OutputContent"), OBS_COMBO_TYPE_LIST,
+        OBS_COMBO_FORMAT_INT);
+    obs_property_list_add_int(output, T("Props.Source.VideoAudio"),
+                              CefVideoConsumer::kOutputBoth);
+    obs_property_list_add_int(output, T("Props.Source.VideoOnly"),
+                              CefVideoConsumer::kOutputVideoOnly);
+    obs_property_list_add_int(output, T("Props.Source.AudioOnly"),
+                              CefVideoConsumer::kOutputAudioOnly);
     obs_properties_add_bool(props, "auto_fit", T("Props.AutoFit"));
     return props;
 }
@@ -100,6 +135,8 @@ static obs_properties_t* cefmedia_source_get_properties(void*)
 static void cefmedia_source_get_defaults(obs_data_t* settings)
 {
     obs_data_set_default_int(settings, kChannelSetting, 1);
+    obs_data_set_default_int(settings, kOutputModeSetting,
+                             CefVideoConsumer::kOutputBoth);
     obs_data_set_default_bool(settings, "auto_fit", true);
 }
 

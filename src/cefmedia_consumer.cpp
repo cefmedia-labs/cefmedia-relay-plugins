@@ -44,11 +44,31 @@ CefVideoConsumer& CefVideoConsumer::Instance()
     return instance;
 }
 
-void CefVideoConsumer::AddSource(obs_source_t* source, int channel)
+void CefVideoConsumer::AddSource(obs_source_t* source, int channel, int output_mode)
 {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
-    sources_.push_back({source, channel});
+    sources_.push_back({source, channel, output_mode});
     StartIfNeeded(channel);
+}
+
+void CefVideoConsumer::UpdateSourceOutputMode(obs_source_t* source, int output_mode)
+{
+    bool became_audio_only = false;
+    std::lock_guard<std::recursive_mutex> lock(mutex_);
+    for (SourceEntry& e : sources_) {
+        if (e.source == source) {
+            if (e.output_mode != output_mode) {
+                e.output_mode = output_mode;
+                became_audio_only = output_mode == kOutputAudioOnly;
+            }
+            break;
+        }
+    }
+    if (became_audio_only) {
+        // Switching to audio-only stops video output permanently; the async
+        // source would otherwise keep rendering its cached last frame forever.
+        obs_source_output_video(source, NULL);
+    }
 }
 
 void CefVideoConsumer::UpdateSourceChannel(obs_source_t* source, int channel)
@@ -71,6 +91,13 @@ void CefVideoConsumer::UpdateSourceChannel(obs_source_t* source, int channel)
         return; // not registered (should not happen)
     }
     StartIfNeeded(channel); // may register callbacks + spawn the new channel's threads
+    // Clear the async frame cache: the source keeps rendering its last frame
+    // (OBS async sources freeze on the newest frame), which after a channel
+    // change is the OLD channel's picture. Until the new channel's first frame
+    // arrives — or forever, if that channel is idle — the stale picture would
+    // linger on the source. obs_source_output_video(NULL) deactivates the
+    // async texture (blank until the new channel delivers).
+    obs_source_output_video(source, NULL);
     // Release the old channel's reader reference if this was its last source
     // (outside the lock — ReaderStop joins threads; same contract as RemoveSource).
     bool old_empty = true;
@@ -206,6 +233,9 @@ void CefVideoConsumer::OnVideoFrame(cefmedia_video_frame* frame, const uint8_t* 
         if (entry.channel != channel) {
             continue; // another channel's source: not ours to feed
         }
+        if (entry.output_mode == kOutputAudioOnly) {
+            continue; // audio-only source: no picture (auto-fit is moot too)
+        }
         obs_source_output_video(entry.source, &obs_frame);
         MaybeQueueAutoFit(entry.source);
     }
@@ -229,6 +259,9 @@ void CefVideoConsumer::OnAudioFrame(cefmedia_audio_buffer* buffer, const uint8_t
     for (const SourceEntry& entry : sources_) {
         if (entry.channel != channel) {
             continue;
+        }
+        if (entry.output_mode == kOutputVideoOnly) {
+            continue; // video-only source: no audio (no doubled same-channel mix)
         }
         obs_source_output_audio(entry.source, &obs_audio);
     }

@@ -45,14 +45,26 @@
 // channel — fan-out keeps those threads alive).
 class CefVideoConsumer {
 public:
+    // Per-source stream filter (source properties "output content" dropdown).
+    // Values are stored in the source settings as ints 0..2; 0 must stay
+    // "both" so sources saved before the setting existed keep their behavior.
+    enum SourceOutputMode {
+        kOutputBoth = 0,     // video + audio (default)
+        kOutputVideoOnly = 1, // skip obs_source_output_audio (no mixer entry)
+        kOutputAudioOnly = 2, // skip obs_source_output_video (blank canvas)
+    };
+
     static CefVideoConsumer& Instance();
 
     // channel: 0-based capture channel the source displays (1-based in the UI).
-    void AddSource(obs_source_t* source, int channel);
+    void AddSource(obs_source_t* source, int channel, int output_mode = kOutputBoth);
     // Rebind a registered source to another channel (the properties dropdown
     // changed): moves the registry entry, starts the new channel's reader and
     // releases the old one when it runs empty. OBS main thread.
     void UpdateSourceChannel(obs_source_t* source, int channel);
+    // Change a registered source's stream filter (properties dropdown changed).
+    // OBS main thread; takes effect from the next frame on.
+    void UpdateSourceOutputMode(obs_source_t* source, int output_mode);
     void RemoveSource(obs_source_t* source);
 
     // Enumerate registered sources under the registry lock (callback must be
@@ -70,6 +82,7 @@ private:
     struct SourceEntry {
         obs_source_t* source;
         int channel; // 0-based capture channel
+        int output_mode; // SourceOutputMode: which streams this source outputs
     };
 
     void StartIfNeeded(int channel);
